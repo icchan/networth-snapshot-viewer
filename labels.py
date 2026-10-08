@@ -14,7 +14,7 @@ from __future__ import annotations
 # does not carry for emoji.
 TYPE_EMOJI = {
     "cash": "💰",
-    "super": "🥚",       # superannuation: a nest egg
+    "super": "🥚",  # superannuation: a nest egg
     "stocks": "📈",
     "property": "🏠",
     "other": "🗂️",
@@ -29,11 +29,30 @@ TYPE_FALLBACK = "•"
 # spans a dozen countries. Only the currencies whose country is defensible are
 # listed, and anything else goes unflagged rather than confidently wrong.
 CURRENCY_COUNTRIES = {
-    "AUD": "AU", "CAD": "CA", "CHF": "CH", "CNY": "CN", "EUR": "EU",
-    "GBP": "GB", "HKD": "HK", "IDR": "ID", "INR": "IN", "JPY": "JP",
-    "KRW": "KR", "MXN": "MX", "MYR": "MY", "NOK": "NO", "NZD": "NZ",
-    "PHP": "PH", "SEK": "SE", "SGD": "SG", "THB": "TH", "TRY": "TR",
-    "TWD": "TW", "USD": "US", "VND": "VN", "ZAR": "ZA",
+    "AUD": "AU",
+    "CAD": "CA",
+    "CHF": "CH",
+    "CNY": "CN",
+    "EUR": "EU",
+    "GBP": "GB",
+    "HKD": "HK",
+    "IDR": "ID",
+    "INR": "IN",
+    "JPY": "JP",
+    "KRW": "KR",
+    "MXN": "MX",
+    "MYR": "MY",
+    "NOK": "NO",
+    "NZD": "NZ",
+    "PHP": "PH",
+    "SEK": "SE",
+    "SGD": "SG",
+    "THB": "TH",
+    "TRY": "TR",
+    "TWD": "TW",
+    "USD": "US",
+    "VND": "VN",
+    "ZAR": "ZA",
 }
 
 

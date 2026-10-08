@@ -80,9 +80,7 @@ def _fetch_row(base: str, targets: list[str], date: str, url: str) -> tuple[dict
     if response.status_code != 200:
         # 404 covers both an unknown currency and a date outside the series.
         # Which one it is gets worked out by the caller, across all bases.
-        raise FxNotFound(
-            f"{base}->{date}: {response.status_code} {response.text.strip()[:80]}"
-        )
+        raise FxNotFound(f"{base}->{date}: {response.status_code} {response.text.strip()[:80]}")
 
     try:
         payload = response.json()
@@ -204,6 +202,7 @@ def _raise_for(refused: dict[str, str], total: int, target: str) -> None:
         f"the rate source does not support {codes} (asked for {target}). "
         f"It carries ECB currencies only."
     )
+
 
 def _currency_names(known: dict[str, str], limit: int = 10) -> str:
     """A short, readable summary of what the source does carry."""

@@ -25,7 +25,6 @@ from fx import FxRates, fetch_fx
 from prices import PriceError, close_on
 from snapshots import Asset, Portfolio, Snapshot
 
-
 #: A holding was re-marked at today's close.
 MARKED = "marked"
 #: A holding is an amount, not a quantity, so it passed through at face value.

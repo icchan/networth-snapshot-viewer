@@ -121,17 +121,13 @@ def check_fx(value: object, currencies: list[str], where: str) -> dict[str, dict
                 raise SnapshotError(f"{where}: fx[{source}][{target}] must be positive, got {rate}")
             seen.add((source, target))
 
-    missing = sorted(
-        f"{s}->{t}" for s in currencies for t in currencies if (s, t) not in seen
-    )
+    missing = sorted(f"{s}->{t}" for s in currencies for t in currencies if (s, t) not in seen)
     if missing:
         raise SnapshotError(f"{where}: fx is missing {len(missing)} pair(s): {', '.join(missing)}")
 
     for code in currencies:
         if value[code][code] != 1 and float(value[code][code]) != 1.0:
-            raise SnapshotError(
-                f"{where}: fx[{code}][{code}] must be 1, got {value[code][code]!r}"
-            )
+            raise SnapshotError(f"{where}: fx[{code}][{code}] must be 1, got {value[code][code]!r}")
 
     return {
         source.upper(): {target.upper(): float(rate) for target, rate in row.items()}
@@ -155,15 +151,16 @@ def check_number(value: object, where: str, field_name: str) -> float | None:
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SnapshotError(
-            f"{where}: {field_name} must be a number, got {value!r}"
-        )
+        raise SnapshotError(f"{where}: {field_name} must be a number, got {value!r}")
     return float(value)
 
 
 def _check_slug(
-    value: object, pattern: re.Pattern[str], label: str,
-    error: type[SnapshotError], why: str,
+    value: object,
+    pattern: re.Pattern[str],
+    label: str,
+    error: type[SnapshotError],
+    why: str,
 ) -> str:
     """Fold case and reject anything outside ``pattern``.
 
@@ -247,9 +244,7 @@ class AssetSpec:
 
         raw_name = raw.get("name")
         if raw_name is not None and (not isinstance(raw_name, str) or not raw_name.strip()):
-            raise SnapshotError(
-                f"{where} ({key}): 'name' must be a non-empty string when given"
-            )
+            raise SnapshotError(f"{where} ({key}): 'name' must be a non-empty string when given")
         name = raw_name.strip() if isinstance(raw_name, str) else None
 
         asset_type = raw.get("type")
@@ -269,9 +264,7 @@ class AssetSpec:
         currency = currency.strip().upper()
 
         raw_ticker = raw.get("ticker")
-        if raw_ticker is not None and (
-            not isinstance(raw_ticker, str) or not raw_ticker.strip()
-        ):
+        if raw_ticker is not None and (not isinstance(raw_ticker, str) or not raw_ticker.strip()):
             raise SnapshotError(f"{where} ({key}): 'ticker' must be a non-empty string")
         ticker = raw_ticker.strip().upper() if isinstance(raw_ticker, str) else None
 
@@ -369,8 +362,11 @@ class Asset:
 
 
 def _check_amount(
-    spec: AssetSpec, value: float | None, units: float | None,
-    price: float | None, where: str,
+    spec: AssetSpec,
+    value: float | None,
+    units: float | None,
+    price: float | None,
+    where: str,
 ) -> None:
     """Validate that this observation can be, or already is, resolved.
 
@@ -407,19 +403,21 @@ def _check_amount(
             f"{where} ({spec.key}): 'units' needs the catalogue's 'ticker' to price "
             f"it, or give 'price' or 'value'"
         )
-    raise SnapshotError(
-        f"{where} ({spec.key}): 'units' needs a matching 'price', or give 'value'"
-    )
+    raise SnapshotError(f"{where} ({spec.key}): 'units' needs a matching 'price', or give 'value'")
 
 
 def _catalogue(
-    specs: list[AssetSpec] | list[dict], currencies: list[str], where: str = "catalogue",
+    specs: list[AssetSpec] | list[dict],
+    currencies: list[str],
+    where: str = "catalogue",
 ) -> dict[str, AssetSpec]:
     """Key a list of spec objects or raw dicts by asset key."""
     out: dict[str, AssetSpec] = {}
     for index, entry in enumerate(specs):
-        spec = entry if isinstance(entry, AssetSpec) else AssetSpec.from_dict(
-            entry, currencies, f"{where}[{index}]"
+        spec = (
+            entry
+            if isinstance(entry, AssetSpec)
+            else AssetSpec.from_dict(entry, currencies, f"{where}[{index}]")
         )
         if spec.key in out:
             raise SnapshotError(f"{where}: duplicate asset key {spec.key!r}")
@@ -470,8 +468,11 @@ class Snapshot:
 
     @classmethod
     def from_dict(
-        cls, raw: object, currencies: list[str],
-        catalogue: dict[str, AssetSpec], where: str,
+        cls,
+        raw: object,
+        currencies: list[str],
+        catalogue: dict[str, AssetSpec],
+        where: str,
     ) -> Snapshot:
         if not isinstance(raw, dict):
             raise SnapshotError(f"{where}: each snapshot must be a mapping")
@@ -508,9 +509,7 @@ class Snapshot:
             spec = catalogue.get(asset.ref)
             if spec is None:
                 known = ", ".join(sorted(catalogue)) or "none"
-                raise SnapshotError(
-                    f"{spot}: unknown asset {asset.ref!r} (catalogue has: {known})"
-                )
+                raise SnapshotError(f"{spot}: unknown asset {asset.ref!r} (catalogue has: {known})")
             _check_amount(spec, asset.value, asset.units, asset.price, spot)
             assets.append(asset)
 
@@ -526,8 +525,7 @@ class Snapshot:
             # flow style: an fx row is a dense table, and one line per row
             # beats the ~n lines block style costs per currency
             "fx": {
-                source: _FlowMap(sorted(row.items()))
-                for source, row in sorted(self.fx.items())
+                source: _FlowMap(sorted(row.items())) for source, row in sorted(self.fx.items())
             },
         }
         if self.assets:
@@ -615,7 +613,11 @@ class Portfolio:
         return snapshot.convert(amount, self.spec(ref).currency, target)
 
     def total_in(
-        self, snapshot: Snapshot, target: str, *, only: Iterable[str] | None = None,
+        self,
+        snapshot: Snapshot,
+        target: str,
+        *,
+        only: Iterable[str] | None = None,
     ) -> float:
         """Everything held on ``snapshot``'s date, restated into ``target``.
 
@@ -652,7 +654,10 @@ class Portfolio:
         return self.name or self.handle or ""
 
     def add_snapshot(
-        self, date: str, holdings: list[dict] | list[Asset], **kwargs,
+        self,
+        date: str,
+        holdings: list[dict] | list[Asset],
+        **kwargs,
     ) -> Snapshot:
         """Build a snapshot against this portfolio's catalogue and append it.
 
@@ -764,7 +769,8 @@ def load(handle: str, directory: Path | str = PORTFOLIO_DIR) -> Portfolio:
 
 
 def save(
-    portfolio: Portfolio, path: Path | str | None = None,
+    portfolio: Portfolio,
+    path: Path | str | None = None,
     directory: Path | str = PORTFOLIO_DIR,
 ) -> Path:
     """Write a portfolio out, oldest snapshot first. Comments are not preserved.
@@ -775,16 +781,19 @@ def save(
     """
     if path is None:
         if portfolio.handle is None:
-            raise PortfolioError(
-                "this portfolio has no handle, so pass an explicit path to save()"
-            )
+            raise PortfolioError("this portfolio has no handle, so pass an explicit path to save()")
         target = portfolio.directory if portfolio.directory is not None else directory
         path = portfolio_path(portfolio.handle, target)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        yaml.dump(portfolio.to_dict(), Dumper=_Dumper, sort_keys=False,
-                  default_flow_style=False, width=100),
+        yaml.dump(
+            portfolio.to_dict(),
+            Dumper=_Dumper,
+            sort_keys=False,
+            default_flow_style=False,
+            width=100,
+        ),
         encoding="utf-8",
     )
     return path

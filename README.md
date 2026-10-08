@@ -558,6 +558,15 @@ Deliberate choices:
   with no amount yet. Those are different facts and the table does not blur them.
 - **Every other column converts at its own date's rates**, not today's, so the columns are
   comparable over time rather than being restated into the present.
+- **The last column opens the arithmetic.** Each asset row ends with a
+  `:material/info:` button that opens a panel below the table: units, price and rate,
+  the conversion, and the whole unit the cell shows — one line per date, in the
+  table's order. It is a button rather than a hover tooltip because there is nothing
+  to hover: the grid is canvas-rendered with no DOM element per cell, and the
+  `cell.tooltip` field Streamlit 1.65 reads is never populated by anything. The
+  callback only records which row was clicked (and re-clicking closes the panel);
+  the panel re-runs the model's own `value_in`, so its numbers cannot drift from
+  the table above it.
 
 Every amount is shown as a whole unit, thousands separators and all, so the table stays
 readable at a glance. That is a display choice only: the file keeps full precision and
@@ -593,20 +602,19 @@ Set `PORTFOLIO_DIR` to read a different folder.
 ## Development
 
 ```bash
-pip install -r requirements.txt
-python test_snapshots.py     # the model, no network
-python test_prices.py        # the price lookup, faked responses
-python test_fx.py            # the rate lookup, faked responses
-python test_market.py        # the live "today" view, faked fetches
-python test_app.py           # the Streamlit page, driven headless
+pip install -r requirements-dev.txt   # runtime deps + pytest + ruff
+python -m pytest                       # all suites, from tests/
+ruff check .                           # lint (add --fix to autofix)
+ruff format .                          # format (line length 100; Python files only)
 ```
 
-All five suites are offline and deterministic: the lookup suites replace `requests.get`
-with a fake serving canned payloads, `test_market.py` injects its fetchers, and
-`test_app.py` replaces the one network call the page makes before running it through
+The suites live in `tests/` and are offline and deterministic: the lookup suites replace
+`requests.get` with a fake serving canned payloads, `test_market.py` injects its fetchers,
+and `test_app.py` replaces the one network call the page makes before running it through
 Streamlit's `AppTest` against the real portfolio. It cross-checks every rendered total
 against `Portfolio.total_in`, so the page cannot quietly start computing its own
-arithmetic.
+arithmetic. Test, lint and format configuration live in `pyproject.toml`, and each check
+is a named assertion via `tests/helpers.py`, so a failure says which check broke.
 
 The handful of live behaviours the fakes stand in for — weekend roll-back, the 1999 series
 start, the ECB currency list, a Yahoo holiday — were confirmed against the real endpoints

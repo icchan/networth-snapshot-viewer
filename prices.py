@@ -112,8 +112,8 @@ def _fetch_window(
     outside is dropped rather than stored.
     """
     # period2 is exclusive, so ask for the day after the last date we want.
-    period1 = dt.datetime.combine(start, dt.time(), tzinfo=dt.timezone.utc)
-    period2 = dt.datetime.combine(end + dt.timedelta(days=1), dt.time(), tzinfo=dt.timezone.utc)
+    period1 = dt.datetime.combine(start, dt.time(), tzinfo=dt.UTC)
+    period2 = dt.datetime.combine(end + dt.timedelta(days=1), dt.time(), tzinfo=dt.UTC)
 
     try:
         response = requests.get(
@@ -157,10 +157,13 @@ def _fetch_window(
     closes = quotes.get("close") or []
 
     out: dict[str, float] = {}
-    for stamp, close in zip(timestamps, closes):
+    # The two arrays are the same series from one response; a holiday shows up
+    # as a null close at its own index, not as a missing timestamp. Ragged
+    # input is truncated rather than raised on, which is how it always behaved.
+    for stamp, close in zip(timestamps, closes, strict=False):
         if close is None:
             continue  # a market holiday inside the window
-        day = dt.datetime.fromtimestamp(stamp, dt.timezone.utc).date()
+        day = dt.datetime.fromtimestamp(stamp, dt.UTC).date()
         if not start <= day <= end:
             continue
         out[day.isoformat()] = round(float(close), PRICE_DP)
@@ -210,8 +213,9 @@ def close_on(
 
     volatile_from = (dt.date.today() - dt.timedelta(days=VOLATILE_DAYS)).isoformat()
     # Only settled days are written, so only settled days may be claimed as covered.
-    cacheable_end = min(target_iso,
-                        (dt.date.today() - dt.timedelta(days=VOLATILE_DAYS + 1)).isoformat())
+    cacheable_end = min(
+        target_iso, (dt.date.today() - dt.timedelta(days=VOLATILE_DAYS + 1)).isoformat()
+    )
 
     candidates: list[tuple[str, float]] = []
     if target_iso < volatile_from and _covered(ranges, window_start, cacheable_end):
@@ -220,8 +224,7 @@ def close_on(
         candidates = [
             (day, price)
             for day, price in entry.items()
-            if isinstance(price, (int, float))
-            and window_start <= day <= target_iso
+            if isinstance(price, (int, float)) and window_start <= day <= target_iso
         ]
 
     if not candidates:
@@ -267,9 +270,7 @@ def _as_date(on: str | dt.date, ticker: str) -> dt.date:
     raise PriceError(f"{ticker}: cannot use {type(on).__name__} as a date")
 
 
-def close_on_many(
-    tickers: list[str], on: str | dt.date, **kwargs
-) -> dict[str, Quote]:
+def close_on_many(tickers: list[str], on: str | dt.date, **kwargs) -> dict[str, Quote]:
     """Look up several tickers, collecting failures instead of stopping at the first."""
     quotes: dict[str, Quote] = {}
     errors: dict[str, str] = {}

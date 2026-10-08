@@ -1,0 +1,29 @@
+# Tool configuration only. The project is a flat set of modules, not a package:
+# there is nothing to build, install or publish, so there is no [project] table.
+
+[tool.pytest.ini_options]
+# The suites live in tests/ but import the modules from the repository root.
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
+
+[tool.ruff]
+# The code was written to about 100 columns; the formatter keeps it there.
+line-length = 100
+target-version = "py311"
+# Ruff 0.16 also formats Markdown's embedded code blocks. The README is the
+# design record and is deliberately hand-shaped; keep the formatter on Python.
+include = ["*.py"]
+
+[tool.ruff.lint]
+# E/F is the pyflakes-plus-pycodestyle core the project used to get from
+# pyflakes; I sorts imports; UP modernises syntax; B and BLE catch the broad
+# excepts and shadowed names the suites care about; C4 and SIM are the safe
+# simplifications; RUF is ruff's own correctness checks.
+select = ["E", "F", "I", "UP", "B", "BLE", "C4", "SIM", "RUF"]
+# Whether a line is too long is the formatter's job, and the formatter cannot
+# split a long string or comment anyway -- E501 would only nag about those.
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
