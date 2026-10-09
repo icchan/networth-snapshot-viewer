@@ -203,6 +203,114 @@ def date_columns(target: str) -> dict:
     return out
 
 
+def _col_chart(df: pd.DataFrame, title: str):
+    import streamlit as st
+
+    # Using built-in streamlit chart
+    st.bar_chart(df.set_index(df.columns[0]), use_container_width=True)
+    st.caption(title)
+
+
+# Add small pie charts above the assets table
+try:
+    # Use latest snapshot's converted values in selected currency for included assets
+    latest_snap = latest
+    rows_pie = []
+    for spec in ordered:
+        if spec.key in excluded:
+            continue
+        v = portfolio.value_in(latest_snap, spec.key, currency)
+        if v is not None and abs(v) > 0:  # only non-zero
+            rows_pie.append({"asset": row_label(spec), "value": whole(v) or 0})
+    if rows_pie:
+        pie_df = pd.DataFrame(rows_pie)
+        # Group by currency and type for the two charts
+        # Build df with groupings
+        # Currency grouping
+        cgroups = []
+        for spec in ordered:
+            if spec.key in excluded:
+                continue
+            v = portfolio.value_in(latest_snap, spec.key, currency)
+            if v is not None and abs(v) > 0:
+                cgroups.append({"group": spec.currency, "value": whole(v) or 0})
+        tgroups = []
+        for spec in ordered:
+            if spec.key in excluded:
+                continue
+            v = portfolio.value_in(latest_snap, spec.key, currency)
+            if v is not None and abs(v) > 0:
+                tgroups.append({"group": spec.type, "value": whole(v) or 0})
+        try:
+            import altair as alt
+        except Exception:
+            alt = None
+        col1, col2 = st.columns(2)
+        cdf = pd.DataFrame(cgroups).groupby("group", as_index=False)["value"].sum()
+        tdf = pd.DataFrame(tgroups).groupby("group", as_index=False)["value"].sum()
+        if alt is not None:
+            # Add percentage and formatted display
+            if cdf["value"].sum() > 0:
+                cdf["pct"] = cdf["value"] / cdf["value"].sum() * 100
+                cdf["pct_lbl"] = cdf["pct"].map(lambda x: f"{x:.1f}%")
+            else:
+                cdf["pct"] = 0
+                cdf["pct_lbl"] = "0%"
+            if tdf["value"].sum() > 0:
+                tdf["pct"] = tdf["value"] / tdf["value"].sum() * 100
+                tdf["pct_lbl"] = tdf["pct"].map(lambda x: f"{x:.1f}%")
+            else:
+                tdf["pct"] = 0
+                tdf["pct_lbl"] = "0%"
+            cdf["label"] = cdf["group"].astype(str) + "\n" + cdf["pct_lbl"]
+            tdf["label"] = tdf["group"].astype(str) + "\n" + tdf["pct_lbl"]
+            with col1:
+                base = alt.Chart(cdf).encode(
+                    theta=alt.Theta("value:Q", stack=True),
+                    color=alt.Color("group:N", legend=None, scale=alt.Scale(scheme="tableau10")),
+                    tooltip=[
+                        alt.Tooltip("group:N", title="Currency"),
+                        alt.Tooltip("value:Q", format=",d", title="Value"),
+                    ],
+                )
+                pie = base.mark_arc()
+                label_base = alt.Chart(cdf).encode(theta=alt.Theta("value:Q", stack=True))
+                text_lbl = label_base.mark_text(
+                    radius=120,
+                    align="center",
+                    baseline="middle",
+                    fill="#000000",
+                    lineBreak="\n",
+                    fontSize=13,
+                ).encode(text=alt.Text("label:N"))
+                st.altair_chart(pie + text_lbl, use_container_width=True)
+            with col2:
+                base = alt.Chart(tdf).encode(
+                    theta=alt.Theta("value:Q", stack=True),
+                    color=alt.Color("group:N", legend=None, scale=alt.Scale(scheme="set2")),
+                    tooltip=[
+                        alt.Tooltip("group:N", title="Type"),
+                        alt.Tooltip("value:Q", format=",d", title="Value"),
+                    ],
+                )
+                pie = base.mark_arc()
+                label_base = alt.Chart(tdf).encode(theta=alt.Theta("value:Q", stack=True))
+                text_lbl = label_base.mark_text(
+                    radius=120,
+                    align="center",
+                    baseline="middle",
+                    fill="#000000",
+                    lineBreak="\n",
+                    fontSize=13,
+                ).encode(text=alt.Text("label:N"))
+                st.altair_chart(pie + text_lbl, use_container_width=True)
+        else:
+            # Fallback: just show the tables as pie-like summaries? Or skip
+            pass
+except Exception:
+    pass
+
+
 # --- assets down, dates across -----------------------------------------------
 
 st.subheader(f"Assets over time ({currency})")
