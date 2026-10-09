@@ -174,9 +174,17 @@ def press(test, row: int) -> None:
     test._run(widget_state=states)
 
 
-def styled_rows(styles: str) -> set[int]:
-    """Row positions the page has applied a grey style to."""
-    return {int(m) for m in re.findall(r"_row(\d+)_col\d+", styles)}
+def styled_rows(styles: str, grey_only: bool = True) -> set[int]:
+    """Row positions the page has applied styling to."""
+    # By default, only match rows that have grey styling (for backwards compat)
+    # But for live row tinting, we need any styling
+    rows = set()
+    for block in styles.split('}'):
+        if grey_only and 'rgba(128,128,128,0.12)' not in block:
+            continue
+        for rm in re.findall(r'_row(\d+)_col', block):
+            rows.add(int(rm))
+    return rows
 
 
 def is_blank(value):
@@ -660,7 +668,7 @@ def test_per_currency_table(fresh, dates):
     )
     check(
         "the live row is tinted, and only it",
-        styled_rows(currency_styles) == {0} and "background-color:" in currency_styles,
+        styled_rows(currency_styles, grey_only=False) == {0} and "background-color:" in currency_styles,
         currency_styles,
     )
     check(

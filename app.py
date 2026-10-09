@@ -299,6 +299,7 @@ def workings(spec: AssetSpec) -> list[str]:
 # non-editable cells -- so the tick column below keeps its normal look and the
 # toggle stays clickable while the rest of the row dims.
 GREY = "color: #8a8f98; background-color: rgba(128,128,128,0.12)"
+LIVE = "background-color: rgba(62,116,253,0.1)"
 
 
 def grey_out(row) -> list[str]:
@@ -390,10 +391,14 @@ rows = [
     ],
 ]
 table = pd.DataFrame(rows)
+style = table.style.apply(grey_out, axis=1).format(show, na_rep="")
+if live is not None:
+    # Style the Today column cells (pandas API compatible)
+    style = style.apply(lambda s: [LIVE] * len(s), axis=1, subset=[TODAY_COL])
 st.data_editor(
     # Styler on the way in: the greying rides on it, and so does how every
     # cell reads (see `show`). The raw values below it are untouched.
-    table.style.apply(grey_out, axis=1).format(show, na_rep=""),
+    style,
     hide_index=True,
     width="stretch",
     key="assets_editor",
@@ -514,7 +519,7 @@ if live is not None:
 # The live row leads this table and is tinted, so "not a snapshot" reads at a
 # glance -- the same Styler channel the greying above uses. The accent is
 # translucent, so it lands on both the light and the dark theme.
-LIVE = "background-color: rgba(62,116,253,0.1)"
+# (moved up with GREY)
 
 
 def tint_live(row) -> list[str]:
