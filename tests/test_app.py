@@ -142,16 +142,9 @@ def table_records(frame):
     return value.to_dict("records") if hasattr(value, "to_dict") else list(value)
 
 
-def panel_lines(test) -> list[str]:
-    """The open panel's date lines, in render order -- its heading excluded."""
-    return [
-        m.value for m in test.markdown if re.match(r"\*\*(Today|\d{4}-\d{2}-\d{2})\*\*", m.value)
-    ]
-
-
-def num(value: float) -> str:
-    """The panel's input format, restated: ten significant digits, grouped."""
-    return f"{value:,.10g}"
+def workings_records(test) -> list[dict]:
+    """The open workings table's rows, in render order."""
+    return table_records(test.dataframe[1])
 
 
 def press(test, row: int) -> None:
@@ -179,10 +172,10 @@ def styled_rows(styles: str, grey_only: bool = True) -> set[int]:
     # By default, only match rows that have grey styling (for backwards compat)
     # But for live row tinting, we need any styling
     rows = set()
-    for block in styles.split('}'):
-        if grey_only and 'rgba(128,128,128,0.12)' not in block:
+    for block in styles.split("}"):
+        if grey_only and "rgba(128,128,128,0.12)" not in block:
             continue
-        for rm in re.findall(r'_row(\d+)_col', block):
+        for rm in re.findall(r"_row(\d+)_col", block):
             rows.add(int(rm))
     return rows
 
@@ -198,6 +191,13 @@ def test_page_loads_cleanly(fresh):
     check("the app runs without raising", not at.exception, str([e.value for e in at.exception]))
     check("and reports no errors", not at.error, str([e.value for e in at.error]))
     check("and no warnings on clean data", not at.warning, str([w.value for w in at.warning]))
+    check(
+        "the table explanation starts collapsed",
+        len(at.expander) == 1
+        and at.expander[0].label == "About this table"
+        and not at.expander[0].proto.expanded,
+        str([(item.label, item.proto.expanded) for item in at.expander]),
+    )
 
 
 # --- the assets table ---------------------------------------------------------
@@ -225,6 +225,12 @@ def test_assets_table(fresh, dates, ordered):
         "the tick column leads, so the toggle sits beside the assets",
         next(iter(assets_table[0])) == "In total",
         str(list(assets_table[0])[:2]),
+    )
+    columns = list(assets_table[0])
+    check(
+        "the workings button follows the asset name",
+        columns.index("How") == columns.index("Asset") + 1,
+        str(columns),
     )
     check(
         "the live column leads the amounts, then snapshots run newest first",
@@ -263,17 +269,11 @@ def test_assets_table(fresh, dates, ordered):
 
 
 def test_workings_column(fresh):
-    """The last column is the workings button, not data."""
+    """The workings button follows the asset name, before the amount columns."""
     at = fresh.at
     assets_table = fresh.assets
 
-    # The last column is a button, not data: the total's cell is empty because the
-    # total has no workings of its own, and every asset row offers the panel.
-    check(
-        "the workings button trails the amounts, as the last column",
-        list(assets_table[0])[-1] == "How",
-        str(list(assets_table[0])),
-    )
+    # The total has no workings of its own, and every asset row offers the panel.
     check(
         "every asset row offers it, and only the total goes without",
         assets_table[0]["How"] == ""
@@ -300,6 +300,28 @@ def test_workings_column(fresh):
         "no row is greyed out while nothing is excluded",
         not styled_rows(at.dataframe[0].proto.arrow_data.styler.styles),
         at.dataframe[0].proto.arrow_data.styler.styles,
+    )
+    check(
+        "the total row has a distinct highlighted style",
+        {
+            int(row)
+            for block in at.dataframe[0].proto.arrow_data.styler.styles.split("}")
+            if "rgba(255,193,7,0.2)" in block
+            for row in re.findall(r"_row(\d+)_col", block)
+        }
+        == {0},
+        at.dataframe[0].proto.arrow_data.styler.styles,
+    )
+    bold_cells = {
+        (int(row), int(column))
+        for block in at.dataframe[0].proto.arrow_data.styler.styles.split("}")
+        if "font-weight: bold" in block
+        for row, column in re.findall(r"_row(\d+)_col(\d+)", block)
+    }
+    check(
+        "only the total row's Today cell is bold",
+        bold_cells == {(0, list(fresh.assets[0]).index("Today"))},
+        str(bold_cells),
     )
 
 
@@ -599,8 +621,9 @@ def test_live_column_missing_price(ordered, dates):
     at.run()
     check(
         "the workings panel says why today's cell is blank",
-        not at.exception and any("no close for MSFT" in line for line in panel_lines(at)),
-        str([e.value for e in at.exception] or panel_lines(at)),
+        not at.exception
+        and any("no close for MSFT" in row["Note"] for row in workings_records(at)),
+        str([e.value for e in at.exception] or workings_records(at)),
     )
 
 
@@ -638,14 +661,13 @@ def test_live_column_no_rates(dates):
         not styled_rows(at.dataframe[1].proto.arrow_data.styler.styles),
         at.dataframe[1].proto.arrow_data.styler.styles,
     )
-    # With no live column there is no line for it: the panel mirrors the table.
+    # With no live column there is no row for it: the panel mirrors the table.
     at.session_state["inspect"] = 1
     at.run()
     check(
-        "the panel's lines are the snapshots, and only those",
-        not at.exception
-        and [re.match(r"\*\*(.*?)\*\*", line).group(1) for line in panel_lines(at)] == dates,
-        str([e.value for e in at.exception] or panel_lines(at)),
+        "the panel's rows are the snapshots, and only those",
+        not at.exception and [row["Snapshot"] for row in workings_records(at)] == dates,
+        str([e.value for e in at.exception] or workings_records(at)),
     )
 
 
@@ -668,7 +690,8 @@ def test_per_currency_table(fresh, dates):
     )
     check(
         "the live row is tinted, and only it",
-        styled_rows(currency_styles, grey_only=False) == {0} and "background-color:" in currency_styles,
+        styled_rows(currency_styles, grey_only=False) == {0}
+        and "background-color:" in currency_styles,
         currency_styles,
     )
     check(
@@ -1060,7 +1083,7 @@ def test_switching_files(tmp_path, monkeypatch):
 
 
 def test_workings_panel(personal, ordered, dates, latest):
-    """The workings panel reproduces each cell's arithmetic."""
+    """The workings table reproduces each cell's arithmetic."""
     base = personal.currencies[0]
     snapshots_newest_first = dates
     TODAY = dt.date.today().isoformat()
@@ -1075,8 +1098,8 @@ def test_workings_panel(personal, ordered, dates, latest):
         str([m.value for m in panel.markdown]),
     )
 
-    # A USD holding, so its line has to carry units, price, rate and result; an AUD
-    # row exercises the no-conversion branch further down.
+    # A USD holding, so its table carries units, price, rate and result; an AUD
+    # row exercises the identity-rate case further down.
     fx_spec = next(s for s in ordered if s.type == "stocks" and s.ticker and s.currency != base)
     fx_row = ordered.index(fx_spec) + 1
     panel.session_state["inspect"] = fx_row
@@ -1092,46 +1115,61 @@ def test_workings_panel(personal, ordered, dates, latest):
         len(headings) == 1 and fx_spec.label in headings[0],
         str(headings),
     )
-    line_for = {re.match(r"\*\*(.*?)\*\*", line).group(1): line for line in panel_lines(panel)}
+    records = workings_records(panel)
+    row_for = {row["Snapshot"]: row for row in records}
     check(
-        "one line per column, in the table's own order",
-        list(line_for) == ["Today", *snapshots_newest_first],
-        str(list(line_for)),
+        "one row per snapshot, in the table's own order",
+        list(row_for) == ["Today", *snapshots_newest_first],
+        str(list(row_for)),
     )
 
     panel_rows = table_records(panel.dataframe[0])
     holding = next(a for a in latest.assets if a.ref == fx_spec.key)
-    snap_line = line_for.get(snapshots_newest_first[0], "")
+    price_column = f"{fx_spec.ticker} price"
+    total_column = f"Total in {fx_spec.currency}"
+    rate_column = f"{fx_spec.currency}→{base} rate"
+    final_column = f"Final value in {base}"
+    snap_row = row_for[snapshots_newest_first[0]]
     check(
-        "the line carries the units and price the file records",
-        num(holding.units) in snap_line and num(holding.price) in snap_line,
-        snap_line,
+        "the table has a column for each calculation input and result",
+        list(records[0])
+        == [
+            "Snapshot",
+            "Units",
+            price_column,
+            total_column,
+            rate_column,
+            final_column,
+            "Shown in table",
+            "Note",
+        ],
+        str(list(records[0])),
     )
     check(
-        "...and the rate that snapshot converts at",
-        num(latest.fx[fx_spec.currency][base]) in snap_line,
-        snap_line,
+        "the snapshot row carries the units, price, and source total",
+        snap_row["Units"] == holding.units
+        and snap_row[price_column] == holding.price
+        and snap_row[total_column] == holding.resolved_value,
+        str(snap_row),
     )
     check(
-        "...and lands on the cell the table shows",
-        f"shown {panel_rows[fx_row][snapshots_newest_first[0]]:,}" in snap_line,
-        snap_line,
+        "the snapshot row carries its rate, final value, and displayed value",
+        snap_row[rate_column] == latest.fx[fx_spec.currency][base]
+        and snap_row[final_column] == personal.value_in(latest, fx_spec.key, base)
+        and snap_row["Shown in table"] == panel_rows[fx_row][snapshots_newest_first[0]],
+        str(snap_row),
     )
-    today_line = line_for.get("Today", "")
+    today_row = row_for["Today"]
     check(
-        "today's line names the close it used",
-        f"({fx_spec.ticker}'s close on {TODAY})" in today_line,
-        today_line,
-    )
-    check(
-        "...and the rates it used",
-        f"({fx_spec.currency}→{base}, rates as at {TODAY})" in today_line,
-        today_line,
+        "today's row names the close and rates it used",
+        f"{fx_spec.ticker}'s close on {TODAY}" in today_row["Note"]
+        and f"rates as at {TODAY}" in today_row["Note"],
+        str(today_row),
     )
     check(
-        "...and lands on that cell too",
-        f"shown {panel_rows[fx_row]['Today']:,}" in today_line,
-        today_line,
+        "today's calculated value matches the asset table",
+        today_row["Shown in table"] == panel_rows[fx_row]["Today"],
+        str(today_row),
     )
 
     # A flat, same-currency holding: no units, no conversion -- and a negative one
@@ -1140,41 +1178,51 @@ def test_workings_panel(personal, ordered, dates, latest):
     flat_row = ordered.index(flat) + 1
     panel.session_state["inspect"] = flat_row
     panel.run()
-    flat_for = {re.match(r"\*\*(.*?)\*\*", line).group(1): line for line in panel_lines(panel)}
+    flat_for = {row["Snapshot"]: row for row in workings_records(panel)}
+    flat_holding = next(
+        holding
+        for holding in personal.by_date(snapshots_newest_first[0]).assets
+        if holding.ref == flat.key
+    )
+    flat_total = f"Total in {flat.currency}"
+    flat_rate = f"{flat.currency}→{base} rate"
+    flat_final = f"Final value in {base}"
     check(
-        "today's line for an amount says it is carried, not priced",
-        "carried at face value" in flat_for.get("Today", ""),
+        "today's row says a flat amount is carried, not priced",
+        "carried at face value" in flat_for["Today"]["Note"],
         str(flat_for.get("Today", "")),
     )
-    snap_line = flat_for.get(snapshots_newest_first[0], "")
+    flat_snapshot = flat_for[snapshots_newest_first[0]]
     check(
-        "a flat amount is shown as the file records it",
-        "(a flat amount in the file)" in snap_line,
-        snap_line,
+        "a flat amount is shown as recorded with an identity conversion rate",
+        "Flat amount in file" in flat_snapshot["Note"]
+        and flat_snapshot["Units"] is None
+        and flat_snapshot["Price"] is None
+        and flat_snapshot[flat_total] == flat_holding.value,
+        str(flat_snapshot),
     )
     check(
-        "a same-currency line says no conversion was needed",
-        f"no conversion needed: {base} to {base}" in snap_line,
-        snap_line,
-    )
-    check(
-        "...and still lands on the cell the table shows",
-        f"shown {table_records(panel.dataframe[0])[flat_row][snapshots_newest_first[0]]:,}"
-        in snap_line,
-        snap_line,
+        "the flat amount's result and shown value match the asset table",
+        flat_snapshot[flat_rate] == 1
+        and flat_snapshot[flat_final]
+        == personal.value_in(personal.by_date(snapshots_newest_first[0]), flat.key, base)
+        and flat_snapshot["Shown in table"]
+        == table_records(panel.dataframe[0])[flat_row][snapshots_newest_first[0]],
+        str(flat_snapshot),
     )
 
     neg = next(s for s in ordered if s.key == "mac-mortgage")
     neg_row = ordered.index(neg) + 1
     panel.session_state["inspect"] = neg_row
     panel.run()
-    neg_line = {re.match(r"\*\*(.*?)\*\*", line).group(1): line for line in panel_lines(panel)}.get(
-        snapshots_newest_first[0], ""
-    )
+    neg_rows = {row["Snapshot"]: row for row in workings_records(panel)}
+    neg_final = f"Final value in {base}"
     check(
         "a liability keeps its sign in the workings",
-        num(personal.value_in(latest, neg.key, base)) in neg_line,
-        neg_line,
+        neg_rows[snapshots_newest_first[0]][neg_final]
+        == personal.value_in(latest, neg.key, base)
+        < 0,
+        str(neg_rows[snapshots_newest_first[0]]),
     )
 
     # A remembered position that no longer maps to a row is ignored, not opened for
@@ -1236,20 +1284,22 @@ def test_workings_panel_not_held(tmp_path, monkeypatch):
     )
     late.session_state["inspect"] = 2  # `new`, held only in the later snapshot
     late.run()
-    late_for = {re.match(r"\*\*(.*?)\*\*", line).group(1): line for line in panel_lines(late)}
+    late_for = {row["Snapshot"]: row for row in workings_records(late)}
     check(
-        "one line for each of that file's own columns",
+        "one row for each of that file's own columns",
         list(late_for) == ["Today", "2026-10-01", "2026-09-01"],
         str(list(late_for)),
     )
     check(
         "the date it was not held says so, rather than reading as zero",
-        "not held on this date" in late_for.get("2026-09-01", ""),
+        late_for["2026-09-01"]["Note"] == "Not held"
+        and is_blank(late_for["2026-09-01"]["Final value in AUD"]),
         str(late_for),
     )
     check(
         "the date it was held shows the amount",
-        "shown 200" in late_for.get("2026-10-01", ""),
+        late_for["2026-10-01"]["Final value in AUD"] == 200
+        and late_for["2026-10-01"]["Shown in table"] == 200,
         str(late_for),
     )
 

@@ -57,19 +57,6 @@ def whole(amount: float | None) -> int | None:
     return magnitude if amount >= 0 else -magnitude
 
 
-# Inputs are shown as they are recorded rather than as whole units: a share
-# register's fractional units and a four-decimal rate are the point of the
-# workings panel below, and two digits would hide both.
-def num(value: float) -> str:
-    """One input as it reads: up to ten significant digits, thousands grouped.
-
-    Ten digits because that is what keeps ``1750.2833`` units and a ``1.4388``
-    rate exact while still printing ``512.8`` rather than ``512.8000000000001``'s
-    worth of binary noise, which would explain nothing.
-    """
-    return f"{value:,.10g}"
-
-
 st.sidebar.title("Portfolio")
 
 handles = list_portfolios(DATA_DIR)
@@ -212,6 +199,7 @@ def _col_chart(df: pd.DataFrame, title: str):
 
 
 # Add small pie charts above the assets table
+alt = None
 try:
     # Use latest snapshot's converted values in selected currency for included assets
     latest_snap = latest
@@ -240,7 +228,13 @@ try:
                 continue
             v = portfolio.value_in(latest_snap, spec.key, currency)
             if v is not None and abs(v) > 0:
-                tgroups.append({"group": spec.type, "value": whole(v) or 0})
+                type_label = "Stock" if spec.type == "stocks" else spec.type.title()
+                tgroups.append(
+                    {
+                        "group": f"{spec.currency} {type_label}",
+                        "value": whole(v) or 0,
+                    }
+                )
         try:
             import altair as alt
         except Exception:
@@ -264,7 +258,8 @@ try:
                 tdf["pct_lbl"] = "0%"
             cdf["label"] = cdf["group"].astype(str) + "\n" + cdf["pct_lbl"]
             tdf["label"] = tdf["group"].astype(str) + "\n" + tdf["pct_lbl"]
-            with col1:
+            with col2:
+                st.subheader("By currency")
                 base = alt.Chart(cdf).encode(
                     theta=alt.Theta("value:Q", stack=True),
                     color=alt.Color("group:N", legend=None, scale=alt.Scale(scheme="tableau10")),
@@ -273,18 +268,19 @@ try:
                         alt.Tooltip("value:Q", format=",d", title="Value"),
                     ],
                 )
-                pie = base.mark_arc()
+                pie = base.mark_arc(innerRadius=45)
                 label_base = alt.Chart(cdf).encode(theta=alt.Theta("value:Q", stack=True))
                 text_lbl = label_base.mark_text(
-                    radius=120,
+                    radius=80,
                     align="center",
                     baseline="middle",
                     fill="#000000",
                     lineBreak="\n",
                     fontSize=13,
                 ).encode(text=alt.Text("label:N"))
-                st.altair_chart(pie + text_lbl, use_container_width=True)
-            with col2:
+                st.altair_chart((pie + text_lbl).properties(width=240, height=240))
+            with col1:
+                st.subheader("By currency and asset type")
                 base = alt.Chart(tdf).encode(
                     theta=alt.Theta("value:Q", stack=True),
                     color=alt.Color("group:N", legend=None, scale=alt.Scale(scheme="set2")),
@@ -293,17 +289,17 @@ try:
                         alt.Tooltip("value:Q", format=",d", title="Value"),
                     ],
                 )
-                pie = base.mark_arc()
+                pie = base.mark_arc(innerRadius=45)
                 label_base = alt.Chart(tdf).encode(theta=alt.Theta("value:Q", stack=True))
                 text_lbl = label_base.mark_text(
-                    radius=120,
+                    radius=80,
                     align="center",
                     baseline="middle",
                     fill="#000000",
                     lineBreak="\n",
                     fontSize=13,
                 ).encode(text=alt.Text("label:N"))
-                st.altair_chart(pie + text_lbl, use_container_width=True)
+                st.altair_chart((pie + text_lbl).properties(width=240, height=240))
         else:
             # Fallback: just show the tables as pie-like summaries? Or skip
             pass
@@ -321,7 +317,7 @@ def cell(spec_key: str, snap, target: str) -> int | None:
     return whole(portfolio.value_in(snap, spec_key, target))
 
 
-def build_row(heading: str, spec_key: str | None) -> dict:
+def build_row(heading: str, spec_key: str | None, how: str) -> dict:
     """A table row: Today first when there is a live view, then the snapshots.
 
     The key is omitted rather than filled with a blank when there is nothing to
@@ -334,72 +330,77 @@ def build_row(heading: str, spec_key: str | None) -> dict:
             row[TODAY_COL] = whole(selected.get(TODAY_COL))
         for snap in snaps:
             row[snap.date] = whole(selected[snap.date])
-        return {"Asset": heading, **row}
+        return {"Asset": heading, "How": how, **row}
     row = {}
     if live is not None:
         row[TODAY_COL] = cell(spec_key, live, currency)
     for snap in snaps:
         row[snap.date] = cell(spec_key, snap, currency)
-    return {"Asset": heading, **row}
+    return {"Asset": heading, "How": how, **row}
 
 
-def workings_line(when: str, snap, spec: AssetSpec) -> str:
-    """One table column as arithmetic: inputs, rate, result, shown unit.
-
-    The chain restates the model's own steps -- the same holding, the same rate,
-    the same rounding -- rather than re-deriving any of it: a workings panel
-    whose numbers disagreed with the table above it would be worse than none.
-    """
+def workings_row(when: str, snap, spec: AssetSpec) -> dict:
+    """One snapshot's inputs and result as a row in the workings table."""
     holding = next((a for a in snap.assets if a.ref == spec.key), None)
-    if holding is None:
-        return f"**{when}** -- not held on this date, so the cell is blank"
-
     source = spec.currency
     live_view = snap is live
     note = next((n for n in live_notes if n.ref == spec.key), None)
+    price_column = f"{spec.ticker} price" if spec.ticker else "Price"
+    total_column = f"Total in {source}"
+    rate_column = f"{source}→{currency} rate"
+    final_column = f"Final value in {currency}"
+    shown_column = "Shown in table"
+    row = {
+        "Snapshot": when,
+        "Units": None,
+        price_column: None,
+        total_column: None,
+        rate_column: None,
+        final_column: None,
+        shown_column: None,
+        "Note": "",
+    }
+    if holding is None:
+        row["Note"] = "Not held"
+        return row
+    row[rate_column] = snap.fx[source][currency]
+
     amount = holding.resolved_value
+    if holding.value is not None:
+        row[total_column] = holding.value
+        row["Note"] = "Flat amount, carried at face value" if live_view else "Flat amount in file"
+    else:
+        row["Units"] = holding.units
+        row[price_column] = holding.price
+        row[total_column] = amount
+
     if amount is None:
-        # The live view knows why its own holding is blank; a snapshot holding
-        # is simply a quantity whose price never came.
-        why = (
+        row["Note"] = (
             note.detail
             if live_view and note is not None and note.kind == market.UNRESOLVED
-            else "units with no price"
+            else "Units with no price"
         )
-        return f"**{when}** -- held, but blank: {why}"
-
-    if holding.value is not None:
-        carried = ", carried at face value" if live_view else " in the file"
-        inputs = f"{num(holding.value)} {source} (a flat amount{carried})"
-    else:
-        # Only the live view re-prices: a snapshot's price is its own record.
-        stamp = ""
-        if live_view and note is not None and " on " in note.detail:
-            stamp = f" ({spec.ticker}'s close on {note.detail.rsplit(' on ', 1)[1]})"
-        inputs = (
-            f"{num(holding.units)} units \u00d7 {num(holding.price)} {source}{stamp}"
-            f" = {num(amount)} {source}"
-        )
+        return row
 
     result = portfolio.value_in(snap, spec.key, currency)
-    if source == currency:
-        return (
-            f"**{when}** -- {inputs} (no conversion needed: {currency} to {currency})"
-            f" \u2192 shown {whole(result):,}"
-        )
-    rate = snap.fx[source][currency]
-    on = f"rates as at {marks.fx_date}" if live_view else f"rates of {snap.date}"
-    return (
-        f"**{when}** -- {inputs} \u00d7 {num(rate)} ({source}\u2192{currency}, {on})"
-        f" = {num(result)} {currency} \u2192 shown {whole(result):,}"
-    )
+    row[final_column] = result
+    row[shown_column] = whole(result)
+    if live_view:
+        live_details = []
+        if note is not None and " on " in note.detail:
+            live_details.append(f"{spec.ticker}'s close on {note.detail.rsplit(' on ', 1)[1]}")
+        if source != currency:
+            live_details.append(f"rates as at {marks.fx_date}")
+        if live_details:
+            row["Note"] = "; ".join(filter(None, [row["Note"], *live_details]))
+    return row
 
 
-def workings(spec: AssetSpec) -> list[str]:
-    """``spec``'s row taken apart, one line per column, in the table's order."""
+def workings(spec: AssetSpec) -> list[dict]:
+    """One table row per saved snapshot, with Today first when available."""
     columns: list[tuple[str, object]] = [] if live is None else [(TODAY_COL, live)]
     columns += [(snap.date, snap) for snap in snaps]
-    return [workings_line(when, snap, spec) for when, snap in columns]
+    return [workings_row(when, snap, spec) for when, snap in columns]
 
 
 # A row ticked out of the totals is greyed where it stands. A pandas Styler is
@@ -408,6 +409,8 @@ def workings(spec: AssetSpec) -> list[str]:
 # toggle stays clickable while the rest of the row dims.
 GREY = "color: #8a8f98; background-color: rgba(128,128,128,0.12)"
 LIVE = "background-color: rgba(62,116,253,0.1)"
+TOTAL = "background-color: rgba(255,193,7,0.2)"
+TOTAL_TODAY = f"{TOTAL}; font-weight: bold"
 
 
 def grey_out(row) -> list[str]:
@@ -418,6 +421,8 @@ def grey_out(row) -> list[str]:
     """
     if row["In total"] is False:
         return [GREY] * len(row)
+    if row.name == 0:
+        return [TOTAL] * len(row)
     return [""] * len(row)
 
 
@@ -488,12 +493,11 @@ rows = [
     # The total has nothing to tick and no workings of its own, so both action
     # columns leave its cell empty rather than offering a control that would
     # mean nothing.
-    {"In total": None, **build_row(total_heading(), None), "How": ""},
+    {"In total": None, **build_row(total_heading(), None, "")},
     *[
         {
             "In total": spec.key not in excluded,
-            **build_row(row_label(spec), spec.key),
-            "How": ":material/info:",
+            **build_row(row_label(spec), spec.key, ":material/info:"),
         }
         for spec in ordered
     ],
@@ -502,7 +506,11 @@ table = pd.DataFrame(rows)
 style = table.style.apply(grey_out, axis=1).format(show, na_rep="")
 if live is not None:
     # Style the Today column cells (pandas API compatible)
-    style = style.apply(lambda s: [LIVE] * len(s), axis=1, subset=[TODAY_COL])
+    style = style.apply(
+        lambda row: [TOTAL_TODAY if row.name == 0 else LIVE] * len(row),
+        axis=1,
+        subset=[TODAY_COL],
+    )
 st.data_editor(
     # Styler on the way in: the greying rides on it, and so does how every
     # cell reads (see `show`). The raw values below it are untouched.
@@ -545,7 +553,7 @@ if excluded:
         + ". Tick 'In total' on the row to count it again."
     )
 
-# The panel the workings button opens: the row taken apart, one line per column
+# The panel the workings button opens: one calculation row per snapshot
 # above. A remembered position that no longer maps to a row -- the file changed
 # underneath between runs -- is ignored rather than opened for the wrong asset.
 inspect_row = st.session_state.get("inspect")
@@ -553,32 +561,50 @@ if isinstance(inspect_row, int) and 0 < inspect_row <= len(ordered):
     inspected = ordered[inspect_row - 1]
     with st.container(border=True):
         st.markdown(f"**How {row_label(inspected)} was valued (in {currency})**")
-        for line in workings(inspected):
-            st.markdown(line)
+        workings_rows = workings(inspected)
+        price_column = f"{inspected.ticker} price" if inspected.ticker else "Price"
+        numeric_columns = [
+            "Units",
+            price_column,
+            f"Total in {inspected.currency}",
+            f"{inspected.currency}→{currency} rate",
+            f"Final value in {currency}",
+            "Shown in table",
+        ]
+        st.dataframe(
+            pd.DataFrame(workings_rows),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                name: st.column_config.NumberColumn(name, format="localized")
+                for name in numeric_columns
+            },
+        )
         st.caption(
-            "One line per column above, in the same order: the inputs as the file "
-            "records them at full precision, the rate that was applied, and the "
-            "whole unit the table shows. Click the same button again to close this."
+            "One row per snapshot. Values retain their recorded precision; "
+            "'Shown in table' is rounded to a whole unit. Click the same button "
+            "again to close this."
         )
 
-st.caption(
-    "Every column except the first converts at that date's own rates, not today's, so "
-    "the snapshots stay comparable over time instead of being restated into the "
-    "present. A blank means the asset was not held on that date, or is held with no "
-    "amount yet -- not zero. "
-    "Every amount is a whole unit, to keep the table readable at a glance; the "
-    "file keeps full precision and nothing is rounded on disk. Totals are added "
-    "up before rounding, so they can differ from the sum of the cells above.\n\n"
-    "Untick 'In total' on a row to leave that asset out of every total on this "
-    "page. The row stays visible but greyed out, and ticking it again puts the "
-    "holding back into the totals.\n\n"
-    "Every asset row ends with a :material/info: button: click it to open a "
-    "panel below the table with that row's arithmetic -- units, price and rate, "
-    "one line per date, ending in the whole unit the table shows.\n\n"
-    "Each row is marked with its type and the country of its currency: "
-    + ", ".join(f"{e} {t}" for t, e in sorted(TYPE_EMOJI.items()))
-    + ". The flag comes from the currency, so it is an approximation."
-)
+with st.expander("About this table", expanded=False):
+    st.caption(
+        "Every column except the first converts at that date's own rates, not today's, so "
+        "the snapshots stay comparable over time instead of being restated into the "
+        "present. A blank means the asset was not held on that date, or is held with no "
+        "amount yet -- not zero. "
+        "Every amount is a whole unit, to keep the table readable at a glance; the "
+        "file keeps full precision and nothing is rounded on disk. Totals are added "
+        "up before rounding, so they can differ from the sum of the cells above.\n\n"
+        "Untick 'In total' on a row to leave that asset out of every total on this "
+        "page. The row stays visible but greyed out, and ticking it again puts the "
+        "holding back into the totals.\n\n"
+        "Every asset row ends with a :material/info: button: click it to open a "
+        "panel below the table with that row's arithmetic -- units, price and rate, "
+        "one line per date, ending in the whole unit the table shows.\n\n"
+        "Each row is marked with its type and the country of its currency: "
+        + ", ".join(f"{e} {t}" for t, e in sorted(TYPE_EMOJI.items()))
+        + ". The flag comes from the currency, so it is an approximation."
+    )
 
 if live is not None:
     marked_dates = sorted(
@@ -639,6 +665,40 @@ def tint_live(row) -> list[str]:
     if live is not None and row.name == 0:
         return [LIVE] * len(row)
     return [""] * len(row)
+
+
+type_snapshot_rows = []
+snapshot_dates = sorted(snap.date for snap in portfolio.snapshots)
+for snap in sorted(portfolio.snapshots, key=lambda item: item.date):
+    values_by_type: dict[str, float] = {}
+    for spec in ordered:
+        if spec.key not in included:
+            continue
+        value = portfolio.value_in(snap, spec.key, currency)
+        if value is not None:
+            values_by_type[spec.type] = values_by_type.get(spec.type, 0) + value
+    type_snapshot_rows.extend(
+        {"date": snap.date, "type": asset_type, "value": value}
+        for asset_type, value in values_by_type.items()
+    )
+
+if type_snapshot_rows and alt is not None:
+    type_snapshot_chart = (
+        alt.Chart(pd.DataFrame(type_snapshot_rows))
+        .mark_bar()
+        .encode(
+            x=alt.X("date:O", sort=snapshot_dates, title="Snapshot"),
+            y=alt.Y("value:Q", stack="zero", title=f"Value ({currency})"),
+            color=alt.Color("type:N", title="Asset type", scale=alt.Scale(scheme="dark2")),
+            tooltip=[
+                alt.Tooltip("date:O", title="Snapshot"),
+                alt.Tooltip("type:N", title="Asset type"),
+                alt.Tooltip("value:Q", format=",.2f", title=f"Value ({currency})"),
+            ],
+        )
+        .properties(title=f"Monthly snapshots by type ({currency})", height=320)
+    )
+    st.altair_chart(type_snapshot_chart, use_container_width=True)
 
 
 st.subheader("Total in each currency")
