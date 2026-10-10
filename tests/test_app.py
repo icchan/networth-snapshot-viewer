@@ -617,7 +617,7 @@ def test_live_column_missing_price(ordered, dates):
     )
     # The panel still explains the blank: the live view knows its own reason.
     msft = next(s for s in ordered if s.key == "msft-ian")
-    at.session_state["inspect"] = ordered.index(msft) + 1
+    at.session_state["inspect_key"] = msft.key
     at.run()
     check(
         "the workings panel says why today's cell is blank",
@@ -630,7 +630,7 @@ def test_live_column_missing_price(ordered, dates):
 # --- the live column, when there are no rates at all -------------------------
 
 
-def test_live_column_no_rates(dates):
+def test_live_column_no_rates(dates, ordered):
     """No rates at all drops the live column rather than showing it empty."""
     MARKS["fail"] = True
     at = run()
@@ -662,7 +662,7 @@ def test_live_column_no_rates(dates):
         at.dataframe[1].proto.arrow_data.styler.styles,
     )
     # With no live column there is no row for it: the panel mirrors the table.
-    at.session_state["inspect"] = 1
+    at.session_state["inspect_key"] = ordered[0].key
     at.run()
     check(
         "the panel's rows are the snapshots, and only those",
@@ -1046,7 +1046,7 @@ def test_switching_files(tmp_path, monkeypatch):
         str(rows[1]["In total"]),
     )
     check("...and the total says so", "excluding 1 asset" in rows[0]["Asset"], rows[0]["Asset"])
-    at.session_state["inspect"] = 1
+    at.session_state["inspect_key"] = "a"
     at.run()
     check(
         "the workings panel opens in the first file",
@@ -1102,7 +1102,7 @@ def test_workings_panel(personal, ordered, dates, latest):
     # row exercises the identity-rate case further down.
     fx_spec = next(s for s in ordered if s.type == "stocks" and s.ticker and s.currency != base)
     fx_row = ordered.index(fx_spec) + 1
-    panel.session_state["inspect"] = fx_row
+    panel.session_state["inspect_key"] = fx_spec.key
     panel.run()
     check(
         "asking for the panel does not take the page down",
@@ -1176,7 +1176,7 @@ def test_workings_panel(personal, ordered, dates, latest):
     # after it, because a sign lost in an explanation is a wrong explanation.
     flat = next(s for s in ordered if s.key == "ubank-tomomi")
     flat_row = ordered.index(flat) + 1
-    panel.session_state["inspect"] = flat_row
+    panel.session_state["inspect_key"] = flat.key
     panel.run()
     flat_for = {row["Snapshot"]: row for row in workings_records(panel)}
     flat_holding = next(
@@ -1212,8 +1212,7 @@ def test_workings_panel(personal, ordered, dates, latest):
     )
 
     neg = next(s for s in ordered if s.key == "mac-mortgage")
-    neg_row = ordered.index(neg) + 1
-    panel.session_state["inspect"] = neg_row
+    panel.session_state["inspect_key"] = neg.key
     panel.run()
     neg_rows = {row["Snapshot"]: row for row in workings_records(panel)}
     neg_final = f"Final value in {base}"
@@ -1227,14 +1226,14 @@ def test_workings_panel(personal, ordered, dates, latest):
 
     # A remembered position that no longer maps to a row is ignored, not opened for
     # whatever asset now sits there -- and the total is not a row it can open.
-    panel.session_state["inspect"] = 999
+    panel.session_state["inspect_key"] = "missing-asset"
     panel.run()
     check(
         "a row that no longer exists is ignored, not misshown",
         not panel.exception and not any("was valued" in m.value for m in panel.markdown),
         str([e.value for e in panel.exception]),
     )
-    panel.session_state["inspect"] = 0
+    panel.session_state["inspect_key"] = None
     panel.run()
     check(
         "the total gets no panel -- its workings are the rows above it",
@@ -1282,7 +1281,7 @@ def test_workings_panel_not_held(tmp_path, monkeypatch):
     check(
         "the fixture portfolio renders", not late.exception, str([e.value for e in late.exception])
     )
-    late.session_state["inspect"] = 2  # `new`, held only in the later snapshot
+    late.session_state["inspect_key"] = "new"  # held only in the later snapshot
     late.run()
     late_for = {row["Snapshot"]: row for row in workings_records(late)}
     check(
