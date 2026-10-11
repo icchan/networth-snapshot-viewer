@@ -10,7 +10,7 @@ asset-exclusion toggles are not documented there).
 ```bash
 pip install -r requirements-dev.txt   # runtime deps (PyYAML, requests, streamlit) + pytest + ruff
 
-python -m pytest                       # the whole suite (68 tests, a few seconds)
+python -m pytest                       # the whole suite (71 tests, a few seconds)
 python -m pytest tests/test_snapshots.py   # or one file — per-test selection with -k
 ruff check .                           # lint; add --fix to autofix, --watch to re-run
 ruff format .                          # format (line length 100, Python files only)
@@ -42,8 +42,9 @@ streamlit run app.py                   # dev server on :8501; PORTFOLIO_DIR env 
 | `prices.py` | Yahoo Finance closes + the shared cache at `data/prices_cache.json` |
 | `market.py` | The live `Today` column: re-marks latest holdings at today's prices/rates |
 | `labels.py` | Row labels: type emoji + currency flag (`CURRENCY_COUNTRIES`) |
-| `app.py` | Streamlit UI — the only entrypoint (via `streamlit run app.py`) |
-| `tests/` | The pytest suites (`test_snapshots.py`, `test_prices.py`, `test_fx.py`, `test_market.py`, `test_app.py`) plus the shared `helpers.py` |
+| `portfolio_view.py` | Streamlit-free view-data builders: pie frames, asset/workings rows, and snapshot/currency totals |
+| `app.py` | Streamlit entrypoint: page flow, rendering, widget callbacks, and session state (`streamlit run app.py`) |
+| `tests/` | The pytest suites (`test_snapshots.py`, `test_prices.py`, `test_fx.py`, `test_market.py`, `test_app.py`, `test_portfolio_view.py`) plus the shared `helpers.py` |
 | `pyproject.toml` | pytest + ruff configuration only |
 | `requirements-dev.txt` | Runtime deps plus pytest and ruff |
 | `data/portfolios/*.yaml` | User data; filename stem is the portfolio handle |

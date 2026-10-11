@@ -21,7 +21,8 @@ from streamlit.proto.WidgetStates_pb2 import WidgetStates
 from streamlit.testing.v1 import AppTest
 
 import market
-from fx import FxError
+import prices
+from fx import FxError, FxRates
 from labels import TYPE_EMOJI
 from labels import flag as flag_of
 from labels import row_label as label_of
@@ -120,9 +121,9 @@ def fresh(personal):
     return SimpleNamespace(
         at=at,
         portfolio=personal,
-        assets=table_records(at.dataframe[0]),
-        currency=table_records(at.dataframe[1]),
-        currency_styles=at.dataframe[1].proto.arrow_data.styler.styles,
+        assets=table_records(asset_frame(at)),
+        currency=table_records(currency_frame(at)),
+        currency_styles=currency_frame(at).proto.arrow_data.styler.styles,
     )
 
 
@@ -142,9 +143,34 @@ def table_records(frame):
     return value.to_dict("records") if hasattr(value, "to_dict") else list(value)
 
 
+def asset_frame(test):
+    return next(
+        frame
+        for frame in test.dataframe
+        if {"In total", "Asset", "How"} <= set(table_records(frame)[0])
+    )
+
+
+def snapshot_entry_frame(test):
+    return next(
+        frame
+        for frame in test.dataframe
+        if {"Asset", "Held", "Entry", "Value", "Units", "Price override"}
+        <= set(table_records(frame)[0])
+    )
+
+
+def currency_frame(test):
+    return next(frame for frame in test.dataframe if "Date" in table_records(frame)[0])
+
+
+def workings_frame(test):
+    return next(frame for frame in test.dataframe if "Snapshot" in table_records(frame)[0])
+
+
 def workings_records(test) -> list[dict]:
     """The open workings table's rows, in render order."""
-    return table_records(test.dataframe[1])
+    return table_records(workings_frame(test))
 
 
 def press(test, row: int) -> None:
@@ -159,7 +185,7 @@ def press(test, row: int) -> None:
     path ``AppTest.run()`` takes with the states it collects from visible
     widgets.
     """
-    widget_id = dict(test.dataframe[0].proto.button_click_widgets)["How"]
+    widget_id = dict(asset_frame(test).proto.button_click_widgets)["How"]
     states = WidgetStates()
     state = states.widgets.add()
     state.id = widget_id
@@ -192,11 +218,20 @@ def test_page_loads_cleanly(fresh):
     check("and reports no errors", not at.error, str([e.value for e in at.error]))
     check("and no warnings on clean data", not at.warning, str([w.value for w in at.warning]))
     check(
+        "the estimated net worth metric is under the portfolio title",
+        len(at.metric) == 1 and at.metric[0].label == "Estimated Current Net Worth",
+        str([(metric.label, metric.value) for metric in at.metric]),
+    )
+    check(
         "the table explanation starts collapsed",
-        len(at.expander) == 1
-        and at.expander[0].label == "About this table"
-        and not at.expander[0].proto.expanded,
+        {item.label: item.proto.expanded for item in at.expander}
+        == {"Enter or edit snapshot": False, "About this table": False},
         str([(item.label, item.proto.expanded) for item in at.expander]),
+    )
+    check(
+        "the snapshot form includes the full asset catalogue",
+        len(table_records(snapshot_entry_frame(at))) == len(fresh.portfolio.specs),
+        str(table_records(snapshot_entry_frame(at))),
     )
 
 
@@ -209,7 +244,9 @@ def test_assets_table(fresh, dates, ordered):
     assets_table = fresh.assets
     snapshots_newest_first = dates
 
-    check("two tables are rendered", len(at.dataframe) == 2, str(len(at.dataframe)))
+    check(
+        "form and two summary tables are rendered", len(at.dataframe) == 3, str(len(at.dataframe))
+    )
     check(
         "the total is the first row",
         assets_table[0]["Asset"].startswith("Total"),
@@ -238,6 +275,11 @@ def test_assets_table(fresh, dates, ordered):
         str(asset_cols),
     )
     check(
+        "the estimated current net worth matches the Today total",
+        at.metric[0].value == f"AUD {assets_table[0]['Today']:,}",
+        f"{at.metric[0].value} vs {assets_table[0]['Today']}",
+    )
+    check(
         "one row per catalogue entry, in currency-then-type order",
         [r["Asset"] for r in assets_table[1:]]
         == [f"{TYPE_EMOJI[s.type]} {flag_of(s.currency)} {s.label}" for s in ordered],
@@ -250,7 +292,7 @@ def test_assets_table(fresh, dates, ordered):
     # thousands separators are the page's contract (see the README); a "5.0" or a
     # "None" leaking through would mean the Styler's formatter is wrong.
     displayed = (
-        pa.ipc.open_stream(at.dataframe[0].proto.arrow_data.styler.display_values)
+        pa.ipc.open_stream(asset_frame(at).proto.arrow_data.styler.display_values)
         .read_all()
         .to_pydict()
     )
@@ -282,8 +324,8 @@ def test_workings_column(fresh):
     )
     check(
         "the button is registered as a clickable widget",
-        "How" in dict(at.dataframe[0].proto.button_click_widgets),
-        str(dict(at.dataframe[0].proto.button_click_widgets)),
+        "How" in dict(asset_frame(at).proto.button_click_widgets),
+        str(dict(asset_frame(at).proto.button_click_widgets)),
     )
     check(
         "a fresh run opens no workings panel",
@@ -298,23 +340,23 @@ def test_workings_column(fresh):
 
     check(
         "no row is greyed out while nothing is excluded",
-        not styled_rows(at.dataframe[0].proto.arrow_data.styler.styles),
-        at.dataframe[0].proto.arrow_data.styler.styles,
+        not styled_rows(asset_frame(at).proto.arrow_data.styler.styles),
+        asset_frame(at).proto.arrow_data.styler.styles,
     )
     check(
         "the total row has a distinct highlighted style",
         {
             int(row)
-            for block in at.dataframe[0].proto.arrow_data.styler.styles.split("}")
+            for block in asset_frame(at).proto.arrow_data.styler.styles.split("}")
             if "rgba(255,193,7,0.2)" in block
             for row in re.findall(r"_row(\d+)_col", block)
         }
         == {0},
-        at.dataframe[0].proto.arrow_data.styler.styles,
+        asset_frame(at).proto.arrow_data.styler.styles,
     )
     bold_cells = {
         (int(row), int(column))
-        for block in at.dataframe[0].proto.arrow_data.styler.styles.split("}")
+        for block in asset_frame(at).proto.arrow_data.styler.styles.split("}")
         if "font-weight: bold" in block
         for row, column in re.findall(r"_row(\d+)_col(\d+)", block)
     }
@@ -589,7 +631,7 @@ def test_live_column_missing_price(ordered, dates):
         not at.exception,
         str([e.value for e in at.exception]),
     )
-    recs = table_records(at.dataframe[0])
+    recs = table_records(asset_frame(at))
     msft_rows = [
         r
         for r in recs[1:]
@@ -639,12 +681,12 @@ def test_live_column_no_rates(dates, ordered):
         not at.exception,
         str([e.value for e in at.exception]),
     )
-    cols = [c for c in table_records(at.dataframe[0])[0] if c not in ("Asset", "In total", "How")]
+    cols = [c for c in table_records(asset_frame(at))[0] if c not in ("Asset", "In total", "How")]
     check("the live column is dropped rather than shown empty", cols == dates, str(cols))
     check(
         "the snapshots still render",
-        len(table_records(at.dataframe[0])) == 17,
-        str(len(table_records(at.dataframe[0]))),
+        len(table_records(asset_frame(at))) == 17,
+        str(len(table_records(asset_frame(at)))),
     )
     check(
         "the page reports why the live column is gone",
@@ -653,13 +695,13 @@ def test_live_column_no_rates(dates, ordered):
     )
     check(
         "...and the live row is dropped from the totals table too",
-        [r["Date"] for r in table_records(at.dataframe[1])] == dates,
-        str([r["Date"] for r in table_records(at.dataframe[1])]),
+        [r["Date"] for r in table_records(currency_frame(at))] == dates,
+        str([r["Date"] for r in table_records(currency_frame(at))]),
     )
     check(
         "...so no row is tinted as live",
-        not styled_rows(at.dataframe[1].proto.arrow_data.styler.styles),
-        at.dataframe[1].proto.arrow_data.styler.styles,
+        not styled_rows(currency_frame(at).proto.arrow_data.styler.styles),
+        currency_frame(at).proto.arrow_data.styler.styles,
     )
     # With no live column there is no row for it: the panel mirrors the table.
     at.session_state["inspect_key"] = ordered[0].key
@@ -759,8 +801,8 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     )
     check(
         "so the heading counts nothing out",
-        table_records(ticked.dataframe[0])[0]["Asset"] == f"Total ({base})",
-        table_records(ticked.dataframe[0])[0]["Asset"],
+        table_records(asset_frame(ticked))[0]["Asset"] == f"Total ({base})",
+        table_records(asset_frame(ticked))[0]["Asset"],
     )
 
     ticked.session_state["excluded"] = {tick_spec.key}
@@ -770,7 +812,7 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         not ticked.exception,
         str([e.value for e in ticked.exception]),
     )
-    rows = table_records(ticked.dataframe[0])
+    rows = table_records(asset_frame(ticked))
     check(
         "the asset shows as unticked",
         rows[tick_row]["In total"] is False,
@@ -786,7 +828,7 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         rows[0]["In total"] is None,
         str(rows[0]["In total"]),
     )
-    css = ticked.dataframe[0].proto.arrow_data.styler.styles
+    css = asset_frame(ticked).proto.arrow_data.styler.styles
     check(
         "the row keeps its plain label -- the exclusion is not spelled out",
         rows[tick_row]["Asset"] == label_of(tick_spec),
@@ -823,7 +865,7 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         abs(
             next(
                 r
-                for r in table_records(ticked.dataframe[1])
+                for r in table_records(currency_frame(ticked))
                 if r["Date"] == snapshots_newest_first[0]
             )[base]
             - want
@@ -832,7 +874,7 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         str(
             next(
                 r
-                for r in table_records(ticked.dataframe[1])
+                for r in table_records(currency_frame(ticked))
                 if r["Date"] == snapshots_newest_first[0]
             )[base]
         ),
@@ -859,13 +901,13 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     ticked.run()
     check(
         "two assets left out are counted as two",
-        table_records(ticked.dataframe[0])[0]["Asset"] == f"Total excluding 2 assets ({base})",
-        table_records(ticked.dataframe[0])[0]["Asset"],
+        table_records(asset_frame(ticked))[0]["Asset"] == f"Total excluding 2 assets ({base})",
+        table_records(asset_frame(ticked))[0]["Asset"],
     )
     check(
         "each of them is greyed out on its own row",
-        styled_rows(ticked.dataframe[0].proto.arrow_data.styler.styles) == {tick_row, other_row},
-        ticked.dataframe[0].proto.arrow_data.styler.styles,
+        styled_rows(asset_frame(ticked).proto.arrow_data.styler.styles) == {tick_row, other_row},
+        asset_frame(ticked).proto.arrow_data.styler.styles,
     )
 
     # Ticking it back has to undo all of it.
@@ -876,11 +918,11 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         not ticked.exception,
         str([e.value for e in ticked.exception]),
     )
-    rows = table_records(ticked.dataframe[0])
+    rows = table_records(asset_frame(ticked))
     check(
         "the tick comes back", rows[tick_row]["In total"] is True, str(rows[tick_row]["In total"])
     )
-    css = ticked.dataframe[0].proto.arrow_data.styler.styles
+    css = asset_frame(ticked).proto.arrow_data.styler.styles
     check("the greying comes off with it", not styled_rows(css), css)
     check(
         "the label was never anything but plain",
@@ -911,7 +953,7 @@ def test_sidebar_currency(fresh, dates):
         not usd.exception,
         str([e.value for e in usd.exception]),
     )
-    usd_rows = table_records(usd.dataframe[0])
+    usd_rows = table_records(asset_frame(usd))
     check(
         "the total row follows the selected currency",
         usd_rows[0]["Asset"].endswith("(USD)"),
@@ -922,7 +964,7 @@ def test_sidebar_currency(fresh, dates):
         usd_rows[0][snapshots_newest_first[0]] != shown,
         f"{usd_rows[0][snapshots_newest_first[0]]} vs {shown}",
     )
-    usd_cur = table_records(usd.dataframe[1])
+    usd_cur = table_records(currency_frame(usd))
     check(
         "the per-currency table is unaffected by the selector",
         usd_cur[0]["USD"] == currency_table[0]["USD"],
@@ -980,7 +1022,7 @@ def test_unmapped_currency_marks(tmp_path, monkeypatch):
         not at.exception,
         str([e.value for e in at.exception]),
     )
-    rows = table_records(at.dataframe[0])[1:]
+    rows = table_records(asset_frame(at))[1:]
     check(
         "an unmapped currency gets no flag, and no stray space",
         rows[0]["Asset"] == f"{TYPE_EMOJI['other']} Gold",
@@ -1039,7 +1081,7 @@ def test_switching_files(tmp_path, monkeypatch):
     )
     at.session_state["excluded"] = {"a"}
     at.run()
-    rows = table_records(at.dataframe[0])
+    rows = table_records(asset_frame(at))
     check(
         "the tick is applied in the first file",
         rows[1]["In total"] is False,
@@ -1059,7 +1101,7 @@ def test_switching_files(tmp_path, monkeypatch):
         not at.exception,
         str([e.value for e in at.exception]),
     )
-    rows = table_records(at.dataframe[0])
+    rows = table_records(asset_frame(at))
     check("the other file is the other file", rows[0]["2026-09-01"] == 500, str(rows[0]))
     check("...with its own tick left alone", rows[1]["In total"] is True, str(rows[1]["In total"]))
     check(
@@ -1123,7 +1165,7 @@ def test_workings_panel(personal, ordered, dates, latest):
         str(list(row_for)),
     )
 
-    panel_rows = table_records(panel.dataframe[0])
+    panel_rows = table_records(asset_frame(panel))
     holding = next(a for a in latest.assets if a.ref == fx_spec.key)
     price_column = f"{fx_spec.ticker} price"
     total_column = f"Total in {fx_spec.currency}"
@@ -1207,7 +1249,7 @@ def test_workings_panel(personal, ordered, dates, latest):
         and flat_snapshot[flat_final]
         == personal.value_in(personal.by_date(snapshots_newest_first[0]), flat.key, base)
         and flat_snapshot["Shown in table"]
-        == table_records(panel.dataframe[0])[flat_row][snapshots_newest_first[0]],
+        == table_records(asset_frame(panel))[flat_row][snapshots_newest_first[0]],
         str(flat_snapshot),
     )
 
@@ -1307,19 +1349,121 @@ def test_workings_panel_not_held(tmp_path, monkeypatch):
 
 
 def test_no_snapshots(tmp_path, monkeypatch):
-    """A portfolio with no snapshots warns rather than raising."""
+    """A portfolio with no snapshots offers the form for its first one."""
     (tmp_path / "empty.yaml").write_text(
         "currencies: [AUD]\nassets:\n  - {key: a, type: cash, currency: AUD}\n"
     )
     monkeypatch.setenv("PORTFOLIO_DIR", str(tmp_path))
     at = run()
     check(
-        "a portfolio with no snapshots is reported, not raised",
+        "an empty portfolio renders without raising",
         not at.exception,
         str([e.value for e in at.exception]),
     )
     check(
-        "...as a warning",
-        any("no snapshots" in w.value for w in at.warning),
-        str([w.value for w in at.warning]),
+        "the first-snapshot prompt is shown",
+        any("first snapshot" in info.value for info in at.info),
+        str([info.value for info in at.info]),
+    )
+    check(
+        "the empty portfolio still has its asset-entry row",
+        len(table_records(snapshot_entry_frame(at))) == 1
+        and table_records(snapshot_entry_frame(at))[0]["Asset"].endswith(" a"),
+        str(table_records(snapshot_entry_frame(at))),
+    )
+
+
+def test_snapshot_entry_creates_and_updates_snapshot(tmp_path, monkeypatch):
+    """The form creates a snapshot and edits it without changing its frozen FX."""
+    (tmp_path / "entry.yaml").write_text(
+        "currencies: [AUD, USD]\n"
+        "assets:\n"
+        "  - {key: cash, name: Cash, type: cash, currency: AUD}\n"
+        "  - {key: shares, name: Shares, type: stocks, ticker: MSFT, currency: USD}\n"
+    )
+    monkeypatch.setenv("PORTFOLIO_DIR", str(tmp_path))
+
+    def fake_fetch_fx(on, currencies, **kwargs):
+        codes = list(currencies)
+        rates = {
+            source: {
+                target: 1.0 if source == target else (0.65 if source == "AUD" else 1.54)
+                for target in codes
+            }
+            for source in codes
+        }
+        return FxRates(on.isoformat(), on.isoformat(), rates)
+
+    monkeypatch.setattr("fx.fetch_fx", fake_fetch_fx)
+    monkeypatch.setattr(
+        prices,
+        "close_on",
+        lambda ticker, on, **kwargs: prices.Quote(
+            ticker=ticker,
+            price=100.0,
+            price_date=on,
+            currency="USD",
+            as_of=on,
+        ),
+    )
+
+    at = run()
+    month = at.selectbox[0].value
+    editor = snapshot_entry_frame(at)
+    row_for = {key: index for index, key in enumerate(editor.value.index)}
+    at.session_state[editor.key] = {
+        "edited_rows": {
+            row_for["cash"]: {"Held": True, "Entry": "Value", "Value": 1200.0},
+            row_for["shares"]: {"Held": True, "Entry": "Units & price", "Units": 2.0},
+        },
+        "added_rows": [],
+        "deleted_rows": [],
+    }
+    at.button[0].click().run()
+
+    check(
+        "creating the first snapshot has no app error",
+        not at.exception,
+        str([e.value for e in at.exception]),
+    )
+    created = load("entry", directory=tmp_path)
+    snapshot_date = f"{month}-01"
+    snapshot = created.by_date(snapshot_date)
+    check(
+        "the new month is saved",
+        snapshot is not None,
+        str([item.date for item in created.snapshots]),
+    )
+    if snapshot is None:
+        return
+    cash = next(asset for asset in snapshot.assets if asset.ref == "cash")
+    shares = next(asset for asset in snapshot.assets if asset.ref == "shares")
+    check("flat values are stored", cash.value == 1200.0, str(cash))
+    check(
+        "units fetch and store the historical close",
+        shares.units == 2 and shares.price == 100.0,
+        str(shares),
+    )
+
+    frozen_fx = snapshot.fx
+    editor = snapshot_entry_frame(at)
+    row_for = {key: index for index, key in enumerate(editor.value.index)}
+    at.session_state[editor.key] = {
+        "edited_rows": {row_for["cash"]: {"Value": 2300.0}},
+        "added_rows": [],
+        "deleted_rows": [],
+    }
+    at.button[0].click().run()
+
+    check(
+        "editing the month has no app error", not at.exception, str([e.value for e in at.exception])
+    )
+    updated = load("entry", directory=tmp_path)
+    snapshot = updated.by_date(snapshot_date)
+    check("editing replaces rather than duplicates the snapshot", len(updated.snapshots) == 1)
+    check(
+        "the edited value is persisted", snapshot is not None and snapshot.assets[0].value == 2300.0
+    )
+    check(
+        "editing keeps the snapshot's FX matrix", snapshot is not None and snapshot.fx == frozen_fx
     )

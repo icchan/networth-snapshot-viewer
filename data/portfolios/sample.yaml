@@ -1,0 +1,122 @@
+name: Sample Portfolio
+currencies:
+- AUD
+- JPY
+- USD
+assets:
+- key: everyday-cash
+  name: Everyday Cash
+  type: cash
+  currency: AUD
+- key: credit-card
+  name: Credit Card
+  type: cash
+  currency: AUD
+- key: home-loan
+  name: Home Loan
+  type: cash
+  currency: AUD
+- key: retirement-super
+  name: Retirement Super
+  type: super
+  currency: AUD
+- key: family-home
+  name: Family Home
+  type: property
+  currency: AUD
+- key: microsoft-shares
+  name: Microsoft Shares
+  type: stocks
+  ticker: MSFT
+  currency: USD
+- key: gold
+  name: Gold
+  type: other
+  currency: JPY
+- key: travel-cash
+  name: Travel Cash
+  type: cash
+  currency: JPY
+snapshots:
+- date: '2026-06-01'
+  fx:
+    AUD: {AUD: 1.0, JPY: 110.0, USD: 0.67}
+    JPY: {AUD: 0.009091, JPY: 1.0, USD: 0.006091}
+    USD: {AUD: 1.492537, JPY: 164.0, USD: 1.0}
+  assets:
+  - ref: everyday-cash
+    value: 12500.0
+  - ref: credit-card
+    value: -620.0
+  - ref: home-loan
+    value: -350000.0
+  - ref: retirement-super
+    value: 81000.0
+  - ref: family-home
+    value: 680000.0
+  - ref: microsoft-shares
+    units: 2.5
+    price: 420.0
+  - ref: gold
+    value: 2000000.0
+- date: '2026-08-01'
+  fx:
+    AUD: {AUD: 1.0, JPY: 105.0, USD: 0.66}
+    JPY: {AUD: 0.009524, JPY: 1.0, USD: 0.006286}
+    USD: {AUD: 1.515152, JPY: 166.7, USD: 1.0}
+  assets:
+  - ref: everyday-cash
+    value: 13900.0
+  - ref: credit-card
+    value: -980.0
+  - ref: home-loan
+    value: -347000.0
+  - ref: retirement-super
+    value: 83600.0
+  - ref: family-home
+    value: 680000.0
+  - ref: microsoft-shares
+    units: 4.5
+    price: 452.3
+  - ref: gold
+    value: 2150000.0
+- date: '2026-09-01'
+  fx:
+    AUD: {AUD: 1.0, JPY: 114.37, USD: 0.71411}
+    JPY: {AUD: 0.00874, JPY: 1.0, USD: 0.00624}
+    USD: {AUD: 1.4003, JPY: 160.16, USD: 1.0}
+  assets:
+  - ref: everyday-cash
+    value: 14000.0
+  - ref: credit-card
+    value: -1700.0
+  - ref: home-loan
+    value: -343500.0
+  - ref: family-home
+    value: 690000.0
+  - ref: microsoft-shares
+    units: 5.0
+    price: 501.02
+- date: '2026-10-01'
+  fx:
+    AUD: {AUD: 1.0, JPY: 102.0, USD: 0.65}
+    JPY: {AUD: 0.009804, JPY: 1.0, USD: 0.006373}
+    USD: {AUD: 1.538462, JPY: 157.0, USD: 1.0}
+  assets:
+  - ref: everyday-cash
+    value: 15100.0
+  - ref: credit-card
+    value: -740.0
+  - ref: home-loan
+    value: -343500.0
+  - ref: retirement-super
+    value: 87200.0
+  - ref: family-home
+    value: 690000.0
+  - ref: microsoft-shares
+    units: 12.75
+    price: 510.2
+  - ref: gold
+    value: 2200000.0
+  - ref: travel-cash
+    value: 120000.0

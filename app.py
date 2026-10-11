@@ -24,16 +24,22 @@ from portfolio_view import (
     build_asset_rows,
     build_currency_rows,
     build_pie_frames,
+    build_snapshot_editor_rows,
     build_snapshot_type_rows,
     build_workings_rows,
+    holdings_from_editor,
+    snapshot_month_options,
     whole,
 )
 from snapshots import (
     PORTFOLIO_DIR,
+    Portfolio,
     PortfolioError,
     SnapshotError,
+    create_snapshot,
     list_portfolios,
     load,
+    save,
 )
 
 st.set_page_config(page_title="Portfolio", layout="wide")
@@ -42,10 +48,123 @@ st.set_page_config(page_title="Portfolio", layout="wide")
 # can exercise the broken-file path against a throwaway directory instead of
 # the real one.
 DATA_DIR = Path(os.environ.get("PORTFOLIO_DIR") or PORTFOLIO_DIR)
+TODAY = dt.date.today().isoformat()
+TODAY_COL = "Today"
 
 
 def render_portfolio_title(title: str) -> None:
     st.title(title)
+
+
+def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None:
+    saved_date = st.session_state.pop("snapshot_saved_date", None)
+    if saved_date:
+        st.success(f"Snapshot saved for {saved_date}.")
+
+    months = snapshot_month_options(portfolio.snapshots, today)
+    with st.expander("Enter or edit snapshot", expanded=False):
+        selected_month = st.selectbox(
+            "Snapshot month",
+            months,
+            key=f"snapshot_month_{handle}",
+        )
+        matches = [
+            snapshot for snapshot in portfolio.snapshots if snapshot.date[:7] == selected_month
+        ]
+        if len(matches) > 1:
+            snapshot_dates = [
+                snapshot.date for snapshot in sorted(matches, key=lambda item: item.date)
+            ]
+            selected_date = st.selectbox(
+                "Snapshot date",
+                snapshot_dates,
+                index=len(snapshot_dates) - 1,
+                key=f"snapshot_date_{handle}_{selected_month}",
+            )
+            existing = next(snapshot for snapshot in matches if snapshot.date == selected_date)
+        elif matches:
+            existing = matches[0]
+            selected_date = existing.date
+        else:
+            existing = None
+            selected_date = f"{selected_month}-01"
+
+        st.caption(
+            "Enter a value or units and price. For tickered assets, leave Price override blank "
+            "to fetch the historical close when saving."
+        )
+        editor_key = f"snapshot_entries_{handle}_{selected_date}"
+        editor_data = pd.DataFrame(
+            build_snapshot_editor_rows(portfolio.specs, existing, row_label)
+        ).set_index("key")
+        with st.form(f"snapshot_form_{handle}_{selected_date}"):
+            edited = st.data_editor(
+                editor_data,
+                hide_index=True,
+                width="stretch",
+                key=editor_key,
+                column_order=["Asset", "Held", "Entry", "Value", "Units", "Price override"],
+                disabled=["Asset"],
+                column_config={
+                    "Asset": st.column_config.TextColumn("Asset", width="large"),
+                    "Held": st.column_config.CheckboxColumn("Held", width="small"),
+                    "Entry": st.column_config.SelectboxColumn(
+                        "Entry",
+                        options=["Value", "Units & price"],
+                        width="medium",
+                    ),
+                    "Value": st.column_config.NumberColumn("Value", format="localized"),
+                    "Units": st.column_config.NumberColumn("Units", format="localized"),
+                    "Price override": st.column_config.NumberColumn(
+                        "Price override",
+                        help="Optional for tickered assets; required for units without a ticker.",
+                        format="localized",
+                    ),
+                },
+            )
+            submitted = st.form_submit_button(
+                "Update snapshot" if existing is not None else "Save snapshot",
+                type="primary",
+            )
+
+        if not submitted:
+            return
+
+        holdings, validation_errors = holdings_from_editor(edited, portfolio.specs)
+        if validation_errors:
+            st.error("Please fix these entries: " + "; ".join(validation_errors))
+            return
+
+        previous_snapshots = list(portfolio.snapshots)
+        try:
+            with st.spinner("Fetching snapshot rates and ticker prices..."):
+                if existing is None:
+                    portfolio.add_snapshot(selected_date, holdings)
+                else:
+                    replacement = create_snapshot(
+                        selected_date,
+                        holdings,
+                        portfolio.currencies,
+                        portfolio.specs,
+                        fx=existing.fx,
+                    )
+                    portfolio.snapshots = sorted(
+                        [
+                            snapshot
+                            for snapshot in portfolio.snapshots
+                            if snapshot.date != selected_date
+                        ]
+                        + [replacement],
+                        key=lambda snapshot: snapshot.date,
+                    )
+                save(portfolio)
+        except (SnapshotError, FxError, OSError) as exc:
+            portfolio.snapshots = previous_snapshots
+            st.error(f"Could not save {selected_date}: {exc}")
+            return
+
+        st.session_state["snapshot_saved_date"] = selected_date
+        st.rerun()
 
 
 def render_pie_charts(frames, alt) -> None:
@@ -105,7 +224,6 @@ def render_asset_table(
     excluded_labels: list[str],
     asset_keys: tuple[str, ...],
 ) -> None:
-    st.subheader(f"Assets over time ({currency})")
     table = pd.DataFrame(rows)
     style = table.style.apply(grey_out, axis=1).format(show, na_rep="")
     if live_present:
@@ -117,6 +235,7 @@ def render_asset_table(
     st.data_editor(
         style,
         hide_index=True,
+        height=580,
         width="stretch",
         key="assets_editor",
         on_change=apply_toggles,
@@ -327,17 +446,19 @@ except (PortfolioError, SnapshotError) as exc:
     st.error(f"`{handle}.yaml` did not load: {exc}")
     st.stop()
 
-if not portfolio.snapshots:
-    st.warning(f"`{handle}` has no snapshots yet.")
-    st.stop()
-
 currency = st.sidebar.radio("Show amounts in", portfolio.currencies)
+render_portfolio_title(portfolio.label or handle)
+current_net_worth_slot = st.empty()
+
+if not portfolio.snapshots:
+    st.subheader(f"Assets over time ({currency})")
+    render_snapshot_entry(portfolio, handle, TODAY)
+    st.info("Save your first snapshot above to start tracking this portfolio.")
+    st.stop()
 
 # Newest first: the question this page answers is "what does it look like now".
 snaps = sorted(portfolio.snapshots, key=lambda s: s.date, reverse=True)
 latest = snaps[0]
-
-render_portfolio_title(portfolio.label or handle)
 
 
 # --- what counts towards the totals ------------------------------------------
@@ -371,9 +492,6 @@ included = {spec.key for spec in ordered} - excluded
 
 
 # --- today's revaluation, which is not a snapshot -----------------------------
-
-TODAY = dt.date.today().isoformat()
-TODAY_COL = "Today"
 
 
 # Cached because the currency selector re-runs the script on every click, and
@@ -537,6 +655,15 @@ def open_workings(asset_keys: tuple[str, ...]) -> None:
 
 # First row, as asked: the total in the selected currency.
 selected = totals_for(currency)
+current_net_worth = selected.get(TODAY_COL)
+current_net_worth_slot.metric(
+    "Estimated Current Net Worth",
+    (
+        f"{currency} {whole(current_net_worth):,}"
+        if current_net_worth is not None
+        else "Unavailable"
+    ),
+)
 rows = build_asset_rows(
     portfolio,
     ordered,
@@ -550,6 +677,8 @@ rows = build_asset_rows(
     TODAY_COL,
     ":material/info:",
 )
+st.subheader(f"Assets over time ({currency})")
+render_snapshot_entry(portfolio, handle, TODAY)
 render_asset_table(
     rows,
     currency,

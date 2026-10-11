@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
+from datetime import date
 
 import pandas as pd
 
@@ -17,6 +18,84 @@ def whole(amount: float | None) -> int | None:
         return None
     magnitude = math.floor(abs(amount) + 0.5)
     return magnitude if amount >= 0 else -magnitude
+
+
+def snapshot_month_options(snapshots: Sequence[Snapshot], today: str) -> list[str]:
+    """List every month from the first saved snapshot through the current/latest month."""
+    months = [snapshot.date[:7] for snapshot in snapshots] + [today[:7]]
+    start = date.fromisoformat(f"{min(months)}-01")
+    end = date.fromisoformat(f"{max(months)}-01")
+    options = []
+    current = start
+    while current <= end:
+        options.append(current.strftime("%Y-%m"))
+        current = date(current.year + (current.month == 12), current.month % 12 + 1, 1)
+    return list(reversed(options))
+
+
+def build_snapshot_editor_rows(
+    specs: Sequence[AssetSpec],
+    snapshot: Snapshot | None,
+    label_for: Callable[[AssetSpec], str],
+) -> list[dict]:
+    """Build one editable row per asset, prefilled when editing a snapshot.
+
+    Tickered assets leave the price override blank by default, so saving units
+    fetches the historical close unless the user enters an override.
+    """
+    holdings = {} if snapshot is None else {asset.ref: asset for asset in snapshot.assets}
+    rows = []
+    for spec in specs:
+        holding = holdings.get(spec.key)
+        rows.append(
+            {
+                "key": spec.key,
+                "Asset": label_for(spec),
+                "Held": holding is not None,
+                "Entry": "Units & price"
+                if holding is not None and holding.value is None
+                else "Value",
+                "Value": None if holding is None else holding.value,
+                "Units": None if holding is None else holding.units,
+                "Price override": (
+                    None if holding is None or spec.ticker is not None else holding.price
+                ),
+            }
+        )
+    return rows
+
+
+def holdings_from_editor(
+    editor: pd.DataFrame, specs: Sequence[AssetSpec]
+) -> tuple[list[dict], list[str]]:
+    """Convert submitted editor rows into validated-shape holdings and row errors."""
+    specs_by_key = {spec.key: spec for spec in specs}
+    holdings = []
+    errors = []
+    for key, row in editor.iterrows():
+        if not row["Held"]:
+            continue
+        if row["Entry"] == "Value":
+            value = row["Value"]
+            if pd.isna(value):
+                errors.append(f"{row['Asset']}: enter a value or uncheck Held")
+                continue
+            holdings.append({"ref": key, "value": float(value)})
+            continue
+
+        units = row["Units"]
+        if pd.isna(units):
+            errors.append(f"{row['Asset']}: enter units or uncheck Held")
+            continue
+        holding = {"ref": key, "units": float(units)}
+        price = row["Price override"]
+        if not pd.isna(price):
+            holding["price"] = float(price)
+        elif specs_by_key[key].ticker is None:
+            errors.append(f"{row['Asset']}: enter a price for units without a ticker")
+            continue
+        holdings.append(holding)
+    return holdings, errors
 
 
 def build_pie_frames(
