@@ -533,9 +533,12 @@ the same date will not agree to the cent.
 
 ## The page
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run from
+the repository root:
+
 ```bash
-pip install -r requirements.txt
-streamlit run app.py
+uv sync --locked --no-dev
+uv run --no-dev streamlit run app.py
 ```
 
 One page, no editing, except for one live column. Assets run down, snapshot dates run
@@ -602,11 +605,27 @@ Set `PORTFOLIO_DIR` to read a different folder.
 ## Development
 
 ```bash
-pip install -r requirements-dev.txt   # runtime deps + pytest + ruff
-python -m pytest                       # all suites, from tests/
-ruff check .                           # lint (add --fix to autofix)
-ruff format .                          # format (line length 100; Python files only)
+uv sync --locked                       # runtime deps + pytest + ruff
+uv run python -m pytest                # all suites, from tests/
+uv run ruff check .                    # lint (add --fix to autofix)
+uv run ruff format .                   # format (line length 100; Python files only)
 ```
+
+Dependencies live in [pyproject.toml](pyproject.toml); [uv.lock](uv.lock) pins the
+resolved versions and belongs in version control. `uv sync` creates the local
+`.venv`, and `uv run` uses it without requiring activation. This is a flat application,
+not an installable package (`tool.uv.package = false`).
+
+Use `uv add <dependency>` for runtime dependencies or `uv add --dev <dependency>`
+for development tools. These update both dependency declarations and the lockfile;
+commit both files. After manually editing dependencies, run `uv lock` and
+`uv sync --locked`. Use `uv lock --upgrade` only when intentionally upgrading the
+locked dependencies.
+
+The devcontainer installs uv and runs `uv sync --locked` automatically. VS Code
+uses `.venv/bin/python` for running and testing Python. Rebuild the container after
+changing its configuration; if an existing workspace still selects the old interpreter,
+use **Python: Select Interpreter** to choose `.venv/bin/python`.
 
 The suites live in `tests/` and are offline and deterministic: the lookup suites replace
 `requests.get` with a fake serving canned payloads, `test_market.py` injects its fetchers,

@@ -2,7 +2,7 @@
   "name": "hellocode (finance tracker)",
   "image": "mcr.microsoft.com/devcontainers/python:3.11-bookworm",
   "remoteUser": "vscode",
-  "postCreateCommand": "python -m pip install -r requirements-dev.txt && curl -fsSL https://opencode.ai/v2/install | bash",
+  "postCreateCommand": "curl -fsSL https://astral.sh/uv/install.sh | sh && \"$HOME/.local/bin/uv\" sync --locked && curl -fsSL https://opencode.ai/v2/install | bash",
   "forwardPorts": [8501],
   "portsAttributes": {
     "8501": {
@@ -18,7 +18,7 @@
         "charliermarsh.ruff"
       ],
       "settings": {
-        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
         "python.testing.pytestEnabled": true,
         "python.testing.unittestEnabled": false,
         "[python]": {

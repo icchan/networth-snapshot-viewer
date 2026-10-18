@@ -1,5 +1,21 @@
-# Tool configuration only. The project is a flat set of modules, not a package:
-# there is nothing to build, install or publish, so there is no [project] table.
+[project]
+name = "finance-tracker"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+	"PyYAML>=6.0",
+	"requests>=2.31",
+	"streamlit>=1.40",
+]
+
+[dependency-groups]
+dev = [
+	"pytest>=8.0",
+	"ruff>=0.6",
+]
+
+[tool.uv]
+package = false
 
 [tool.pytest.ini_options]
 # The suites live in tests/ but import the modules from the repository root.

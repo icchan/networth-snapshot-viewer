@@ -1,28 +1,31 @@
 # AGENTS.md
 
 Personal net-worth tracker: a flat Python 3.11 project — data model + a Streamlit page.
-No packages, no build step, no CI, no pre-commit. `README.md` is the design record and is
-mostly accurate; where it and the code disagree, trust the code (e.g. the page's
-asset-exclusion toggles are not documented there).
+No packages, no build step, no CI, no pre-commit. [README.md](README.md) is the design
+record; trust code and tests where it is stale (its opening still says there is no UI).
+See [data format](README.md#portfolios), [validation](README.md#rules-enforced-on-load),
+[API usage](README.md#usage), and [page behavior](README.md#the-page) for details.
 
 ## Commands
 
 ```bash
-pip install -r requirements-dev.txt   # runtime deps (PyYAML, requests, streamlit) + pytest + ruff
+uv sync --locked                       # runtime deps + pytest + ruff in .venv
 
-python -m pytest                       # the whole suite (71 tests, a few seconds)
-python -m pytest tests/test_snapshots.py   # or one file — per-test selection with -k
-ruff check .                           # lint; add --fix to autofix, --watch to re-run
-ruff format .                          # format (line length 100, Python files only)
-streamlit run app.py                   # dev server on :8501; PORTFOLIO_DIR env overrides data dir
+uv run python -m pytest                 # the whole suite (a few seconds)
+uv run python -m pytest tests/test_snapshots.py   # or one file — per-test selection with -k
+uv run ruff check .                     # lint; add --fix to autofix, --watch to re-run
+uv run ruff format .                    # format (line length 100, Python files only)
+uv run streamlit run app.py             # dev server on :8501; PORTFOLIO_DIR env overrides data dir
 ```
 
-- pytest and ruff are configured in `pyproject.toml` (which has no `[project]` table — this
-  is not a package) and installed by the devcontainer from `requirements-dev.txt`. The VS
-  Code config enables the pytest runner and the ruff extension (format-on-save).
+- Dependencies, pytest, and ruff are configured in [pyproject.toml](pyproject.toml).
+  This remains a non-packaged application (`tool.uv.package = false`). Commit
+  [uv.lock](uv.lock) with dependency changes; use `uv add` or `uv add --dev` rather
+  than maintaining requirements files. See [development](README.md#development).
+- The devcontainer installs uv and syncs `.venv` from the lockfile. VS Code uses
+  `.venv/bin/python`, enables the pytest runner, and uses ruff for format-on-save.
 - Run only the test file matching the module you touched when you want a quick loop;
-  otherwise the whole run is fast enough to just `pytest` it. There are none of the old
-  monolithic scripts left — suites are collections of `def test_*()` functions.
+  otherwise the whole run is fast enough to run `uv run python -m pytest`.
 - The suites share labelled assertion helpers in `tests/helpers.py`: `check("label", cond)`
   is a plain assert whose message names the check, and `raises()` names the exception type
   explicitly. Keep using them so a failure says which check broke.
@@ -43,12 +46,20 @@ streamlit run app.py                   # dev server on :8501; PORTFOLIO_DIR env 
 | `market.py` | The live `Today` column: re-marks latest holdings at today's prices/rates |
 | `labels.py` | Row labels: type emoji + currency flag (`CURRENCY_COUNTRIES`) |
 | `portfolio_view.py` | Streamlit-free view-data builders: pie frames, asset/workings rows, and snapshot/currency totals |
-| `app.py` | Streamlit entrypoint: page flow, rendering, widget callbacks, and session state (`streamlit run app.py`) |
+| `app.py` | Streamlit entrypoint: page flow, rendering, snapshot-entry form, widget callbacks, and session state |
 | `tests/` | The pytest suites (`test_snapshots.py`, `test_prices.py`, `test_fx.py`, `test_market.py`, `test_app.py`, `test_portfolio_view.py`) plus the shared `helpers.py` |
-| `pyproject.toml` | pytest + ruff configuration only |
-| `requirements-dev.txt` | Runtime deps plus pytest and ruff |
+| `pyproject.toml` | uv dependency declarations, dev group, pytest + ruff configuration |
+| `uv.lock` | Locked runtime and development dependencies; commit with dependency changes |
 | `data/portfolios/*.yaml` | User data; filename stem is the portfolio handle |
 
+- Keep view-data calculations in [portfolio_view.py](portfolio_view.py), independent of
+  Streamlit; keep layout, section render functions, callbacks, and session state in
+  [app.py](app.py). Test pure builders in [tests/test_portfolio_view.py](tests/test_portfolio_view.py)
+  and page interactions in [tests/test_app.py](tests/test_app.py).
+- Snapshot entry must fetch missing historical prices/rates and save only on submission,
+  not ordinary Streamlit reruns. Creating a snapshot uses `Portfolio.add_snapshot()`;
+  editing an existing snapshot preserves its frozen FX matrix. Follow the offline
+  create/edit coverage in [tests/test_app.py](tests/test_app.py).
 - Errors: `SnapshotError(ValueError)` is the base; `PortfolioError` and `FxError`
   subclass it. `PriceError(RuntimeError)` is separate — a bare `except SnapshotError`
   does not catch price failures.
