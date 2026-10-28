@@ -4,8 +4,10 @@ import pytest
 from helpers import check
 
 from portfolio_view import (
+    build_asset_rows,
     build_pie_frames,
     build_snapshot_editor_rows,
+    build_snapshot_trend_rows,
     build_snapshot_type_rows,
     holdings_from_editor,
     snapshot_month_options,
@@ -17,6 +19,86 @@ from snapshots import load
 @pytest.fixture
 def personal():
     return load("personal")
+
+
+@pytest.mark.parametrize(
+    "totals",
+    [{}, {"2026-01-01": 100.0}, {"2026-01-01": None, "2026-02-01": 100.0}],
+)
+def test_snapshot_trend_requires_two_complete_totals(totals):
+    check(
+        "no regression with fewer than two complete snapshots",
+        build_snapshot_trend_rows(totals) == [],
+    )
+
+
+def test_snapshot_trend_uses_elapsed_days_and_skips_incomplete_totals():
+    rows = build_snapshot_trend_rows(
+        {"2026-02-10": 180.0, "2026-01-05": None, "2026-01-01": 100.0, "2026-01-11": 120.0}
+    )
+    check(
+        "trend points are chronological",
+        [row["date"] for row in rows] == ["2026-01-01", "2026-01-11", "2026-02-10"],
+    )
+    check(
+        "uneven dates follow the fitted daily growth",
+        [row["trend"] for row in rows] == pytest.approx([100, 120, 180]),
+    )
+
+
+def test_snapshot_trend_is_a_best_fit_not_a_line_joining_totals():
+    rows = build_snapshot_trend_rows({"2026-01-01": -10.0, "2026-01-02": 10.0, "2026-01-03": 0.0})
+    check(
+        "least-squares fit includes negative net worth",
+        [row["trend"] for row in rows] == pytest.approx([-5, 0, 5]),
+    )
+
+
+@pytest.mark.parametrize("live_present", [False, True])
+@pytest.mark.parametrize("missing_latest", [False, True])
+def test_asset_change_row_compares_previous_totals(personal, live_present, missing_latest):
+    snapshots = sorted(personal.snapshots, key=lambda snapshot: snapshot.date, reverse=True)[:3]
+    totals = dict(
+        zip([snapshot.date for snapshot in snapshots], [200.4, 150.1, 170.8], strict=True)
+    )
+    totals["Today"] = 225.5
+    if missing_latest:
+        totals[snapshots[0].date] = None
+    rows = build_asset_rows(
+        personal,
+        [],
+        snapshots,
+        "AUD",
+        snapshots[0] if live_present else None,
+        totals,
+        set(),
+        "Total (AUD)",
+        lambda spec: spec.label,
+        "Today",
+        "How",
+    )
+    change, total = rows
+    check(
+        "change row appears above the total",
+        change["Asset"] == "Change (AUD)" and total["Asset"] == "Total (AUD)",
+    )
+    check(
+        "summary rows have no checkbox or workings",
+        all(row["In total"] is None and row["How"] == "" for row in rows),
+    )
+    check("oldest snapshot has no prior comparison", change[snapshots[-1].date] is None)
+    check("declines remain negative", change[snapshots[1].date] == -21)
+    check(
+        "changes use unrounded totals",
+        change[snapshots[0].date] == (None if missing_latest else 50),
+    )
+    if live_present:
+        check(
+            "Today compares with the latest saved total",
+            change["Today"] == (None if missing_latest else 25),
+        )
+    else:
+        check("no live change without a live column", "Today" not in change)
 
 
 def test_whole_rounds_half_away_from_zero():
@@ -170,24 +252,69 @@ def test_pie_frames_group_latest_values(personal):
     )
 
 
-def test_snapshot_type_rows_are_chronological_and_aggregated(personal):
+@pytest.mark.parametrize("currency", ["AUD", "JPY", "USD"])
+@pytest.mark.parametrize("exclude_first", [False, True])
+def test_snapshot_type_rows_include_a_distinct_live_estimate(personal, currency, exclude_first):
+    latest = max(personal.snapshots, key=lambda snapshot: snapshot.date)
+    included = {spec.key for spec in personal.specs}
+    if exclude_first:
+        included.remove(personal.specs[0].key)
+    rows = build_snapshot_type_rows(
+        personal, personal.snapshots, personal.specs, included, currency, live=latest
+    )
+    live_rows = [row for row in rows if row["status"] == "Live estimate"]
+    check("live estimate appears after recorded history", rows[-len(live_rows) :] == live_rows)
+    check(
+        "live label differs even on a recorded date",
+        {row["date"] for row in live_rows} == {"Today (live)"},
+    )
+    check(
+        "live tooltip retains its actual date", {row["as_of"] for row in live_rows} == {latest.date}
+    )
+    check(
+        "live total uses selected currency and exclusions",
+        sum(row["value"] for row in live_rows)
+        == pytest.approx(personal.total_in(latest, currency, only=included)),
+    )
+
+
+@pytest.mark.parametrize("currency", ["AUD", "JPY", "USD"])
+@pytest.mark.parametrize("exclude_first", [False, True])
+def test_snapshot_type_rows_are_chronological_and_aggregated(personal, currency, exclude_first):
     specs = sorted(personal.specs, key=lambda spec: (spec.currency, spec.type))
     included = {spec.key for spec in specs}
-    currency = personal.currencies[0]
+    if exclude_first:
+        included.remove(specs[0].key)
     rows = build_snapshot_type_rows(personal, personal.snapshots, specs, included, currency)
     dates = [row["date"] for row in rows]
     check("snapshot data is chronological", dates == sorted(dates), str(dates))
+
+    expected_groups = {
+        (snapshot.date, spec.currency, spec.type)
+        for snapshot in personal.snapshots
+        for spec in specs
+        if spec.key in included and personal.value_in(snapshot, spec.key, currency) is not None
+    }
+    actual_groups = [(row["date"], row["currency"], row["type"]) for row in rows]
+    check(
+        "each date/currency/type group appears once", len(actual_groups) == len(set(actual_groups))
+    )
+    check("all included groups are represented", set(actual_groups) == expected_groups)
 
     for row in rows:
         snapshot = personal.by_date(row["date"])
         expected = sum(
             value
             for spec in specs
-            if spec.key in included and spec.type == row["type"]
+            if spec.key in included
+            and spec.type == row["type"]
+            and spec.currency == row["currency"]
             if (value := personal.value_in(snapshot, spec.key, currency)) is not None
         )
         check(
-            f"{row['date']} {row['type']} is aggregated from model values",
+            f"{row['date']} {row['group']} is aggregated from model values",
             row["value"] == expected,
             f"{row['value']} vs {expected}",
         )
+        type_label = "Stock" if row["type"] == "stocks" else row["type"].title()
+        check("group labels match the pie chart", row["group"] == f"{row['currency']} {type_label}")

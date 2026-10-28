@@ -541,9 +541,13 @@ uv sync --locked --no-dev
 uv run --no-dev streamlit run app.py
 ```
 
-One page, no editing, except for one live column. Assets run down, snapshot dates run
-across, newest first, and the first row is the total in the currency picked in the
-sidebar. Underneath, the same totals expressed in every currency the portfolio declares.
+Assets run down and snapshot dates run across, newest first. A change row sits above
+the total in the currency picked in the sidebar: each snapshot compares with the
+preceding saved snapshot, and `Today` compares with the most recent snapshot.
+Increases are green, decreases red, and zero is neutral. The oldest comparison and
+comparisons with unavailable totals stay blank. Changes use unrounded totals and
+respect asset exclusions. Underneath, the same totals are expressed in every currency
+the portfolio declares.
 
 Deliberate choices:
 

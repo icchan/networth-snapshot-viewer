@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Sequence
 from datetime import date
+from statistics import linear_regression
 
 import pandas as pd
 
 import market
-from snapshots import AssetSpec, Portfolio, Snapshot
+from snapshots import AssetSpec, Portfolio, Snapshot, SnapshotError
 
 
 def whole(amount: float | None) -> int | None:
@@ -154,7 +155,18 @@ def build_asset_rows(
     for snapshot in snapshots:
         total_row[snapshot.date] = whole(totals[snapshot.date])
 
-    rows = [total_row]
+    change_row: dict = {"In total": None, "Asset": f"Change ({target})", "How": ""}
+    columns = ([today_column] if live is not None else []) + [
+        snapshot.date for snapshot in snapshots
+    ]
+    for index, column in enumerate(columns):
+        previous = totals.get(columns[index + 1]) if index + 1 < len(columns) else None
+        current = totals.get(column)
+        change_row[column] = (
+            whole(current - previous) if current is not None and previous is not None else None
+        )
+
+    rows = [change_row, total_row]
     for spec in specs:
         row = {
             "In total": spec.key in included,
@@ -252,22 +264,55 @@ def build_snapshot_type_rows(
     specs: Sequence[AssetSpec],
     included: set[str],
     currency: str,
+    *,
+    live: Snapshot | None = None,
 ) -> list[dict]:
-    """Build chronological snapshot totals grouped by asset type."""
+    """Group recorded snapshots and an optional complete live estimate by currency/type."""
     rows = []
-    for snapshot in sorted(snapshots, key=lambda item: item.date):
-        values_by_type: dict[str, float] = {}
+    observations = [(snapshot, False) for snapshot in sorted(snapshots, key=lambda item: item.date)]
+    if live is not None:
+        try:
+            portfolio.total_in(live, currency, only=included)
+        except SnapshotError:
+            pass
+        else:
+            observations.append((live, True))
+    for snapshot, is_live in observations:
+        values_by_group: dict[tuple[str, str], float] = {}
         for spec in specs:
             if spec.key not in included:
                 continue
             value = portfolio.value_in(snapshot, spec.key, currency)
             if value is not None:
-                values_by_type[spec.type] = values_by_type.get(spec.type, 0) + value
+                group = (spec.currency, spec.type)
+                values_by_group[group] = values_by_group.get(group, 0) + value
         rows.extend(
-            {"date": snapshot.date, "type": asset_type, "value": value}
-            for asset_type, value in values_by_type.items()
+            {
+                "date": "Today (live)" if is_live else snapshot.date,
+                "as_of": snapshot.date,
+                "status": "Live estimate" if is_live else "Recorded snapshot",
+                "currency": source,
+                "type": asset_type,
+                "group": f"{source} {'Stock' if asset_type == 'stocks' else asset_type.title()}",
+                "value": value,
+            }
+            for (source, asset_type), value in values_by_group.items()
         )
     return rows
+
+
+def build_snapshot_trend_rows(totals: dict[str, float | None]) -> list[dict]:
+    """Fit historical net totals against elapsed days, omitting incomplete snapshots."""
+    observations = sorted((on, total) for on, total in totals.items() if total is not None)
+    if len(observations) < 2:
+        return []
+    start = date.fromisoformat(observations[0][0])
+    days = [(date.fromisoformat(on) - start).days for on, _ in observations]
+    slope, intercept = linear_regression(days, [total for _, total in observations])
+    return [
+        {"date": on, "trend": intercept + slope * elapsed}
+        for (on, _), elapsed in zip(observations, days, strict=True)
+    ]
 
 
 def build_currency_rows(

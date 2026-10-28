@@ -127,6 +127,67 @@ def fresh(personal):
     )
 
 
+@pytest.mark.parametrize("live_state", ["available", "no_rates", "missing_price"])
+def test_snapshot_chart_has_currency_and_type_labels(monkeypatch, personal, live_state):
+    if live_state == "no_rates":
+        MARKS["fail"] = True
+    elif live_state == "missing_price":
+        latest = max(personal.snapshots, key=lambda snapshot: snapshot.date)
+        MARKS["drop"] = set(market.tickers_to_mark(personal, latest))
+    charts = []
+    original = st.altair_chart
+
+    def capture_chart(chart, *args, **kwargs):
+        charts.append(chart.to_dict())
+        return original(chart, *args, **kwargs)
+
+    monkeypatch.setattr(st, "altair_chart", capture_chart)
+    page = run()
+    check("page renders without errors", not page.exception)
+    chart = next(
+        chart for chart in charts if str(chart.get("title", "")).startswith("Monthly snapshots")
+    )
+    bars, trend = chart["layer"]
+    axis = bars["encoding"]["x"]["axis"]
+    check("snapshot labels stay horizontal", axis["labelAngle"] == 0)
+    check("both chart layers use the same axis labels", axis == trend["encoding"]["x"]["axis"])
+    check(
+        "axis shows year/month and an explicit live label",
+        all(part in axis["labelExpr"] for part in ["'%Y'", "'%b'", "['Today', '(Live)']"]),
+    )
+    field = bars["encoding"]["color"]["field"]
+    rows = chart["datasets"][bars["data"]["name"]]
+    labels = {row.get(field) for row in rows}
+    check("every stack has a currency/type label", all(isinstance(label, str) for label in labels))
+    check("chart contains multiple currency/type stacks", len(labels) > 1)
+    live_rows = [row for row in rows if row["status"] == "Live estimate"]
+    check("live bars require complete live values", bool(live_rows) == (live_state == "available"))
+    if live_rows:
+        check(
+            "live bars have an explicit label",
+            all(row["date"] == "Today (live)" for row in live_rows),
+        )
+        check("live bars appear last", bars["encoding"]["x"]["sort"][-1] == "Today (live)")
+        check(
+            "live bars use lighter fills", bars["encoding"]["opacity"]["condition"]["value"] == 0.6
+        )
+        check(
+            "live bars have no segment outlines",
+            "stroke" not in bars["encoding"] and "strokeWidth" not in bars["mark"],
+        )
+    check(
+        "trend is a dotted line",
+        trend["mark"]["type"] == "line" and trend["mark"]["strokeDash"] == [2, 5],
+    )
+    check("trend uses fitted totals", trend["encoding"]["y"]["field"] == "trend")
+    trend_rows = chart["datasets"][trend["data"]["name"]]
+    check(
+        "trend covers saved snapshots only",
+        {row["date"] for row in trend_rows}
+        == {row["date"] for row in rows if row["status"] == "Recorded snapshot"},
+    )
+
+
 def run():
     # The page memoizes today's fetch, so the cache is dropped between runs --
     # otherwise a test that changes what the fake returns would be served the
@@ -238,6 +299,131 @@ def test_page_loads_cleanly(fresh):
 # --- the assets table ---------------------------------------------------------
 
 
+def test_asset_changes_are_colored_and_follow_exclusions(tmp_path, monkeypatch):
+    dates = ["2026-05-01", "2026-06-01", "2026-07-01", "2026-08-01"]
+    contents = "currencies: [AUD]\nassets: [{key: cash, type: cash, currency: AUD}]\nsnapshots:\n"
+    for on, value in zip(dates, [100, 150, 120, 120], strict=True):
+        contents += f"  - date: '{on}'\n    fx: {{AUD: {{AUD: 1.0}}}}\n    assets: [{{ref: cash, value: {value}}}]\n"
+    (tmp_path / "changes.yaml").write_text(contents)
+    monkeypatch.setenv("PORTFOLIO_DIR", str(tmp_path))
+    page = run()
+    check("change summary renders without errors", not page.exception)
+    rows = table_records(asset_frame(page))
+    check(
+        "change summary leads the total",
+        [row["Asset"] for row in rows[:2]] == ["Change (AUD)", "Total (AUD)"],
+    )
+    change = rows[0]
+    check(
+        "changes include increases, declines and no change",
+        [change[on] for on in dates[1:]] == [50, -30, 0],
+    )
+    check("the oldest comparison is blank", is_blank(change[dates[0]]))
+    check("live change compares with the latest saved total", change["Today"] == 0)
+    check(
+        "summaries offer neither checkbox nor workings",
+        all(row["In total"] is None and row["How"] == "" for row in rows[:2]),
+    )
+    styles = asset_frame(page).proto.arrow_data.styler.styles
+    for color, on in [("#1b9e5a", dates[1]), ("#e63946", dates[2])]:
+        cells = {
+            (int(row), int(column))
+            for block in styles.split("}")
+            if f"color: {color}" in block
+            for row, column in re.findall(r"_row(\d+)_col(\d+)", block)
+        }
+        check(
+            f"{color} applies only to the matching change", cells == {(0, list(change).index(on))}
+        )
+    displayed = (
+        pa.ipc.open_stream(asset_frame(page).proto.arrow_data.styler.display_values)
+        .read_all()
+        .to_pydict()
+    )
+    check("oldest change displays blank rather than NaN", displayed[dates[0]][0] == "")
+    page.session_state["excluded"] = {"cash"}
+    page.run()
+    change = table_records(asset_frame(page))[0]
+    check("changes follow exclusions", all(change[on] == 0 for on in ["Today", *dates[1:]]))
+
+
+def test_today_column_colors_compare_latest_snapshot(fresh, dates):
+    rows = fresh.assets
+    today_column = list(rows[0]).index("Today")
+    styles = asset_frame(fresh.at).proto.arrow_data.styler.styles
+    for color, higher in [("#1b9e5a", True), ("#e63946", False)]:
+        actual = {
+            (int(row), int(column))
+            for block in styles.split("}")
+            if f"color: {color}" in block
+            for row, column in re.findall(r"_row(\d+)_col(\d+)", block)
+            if int(row) > 0
+        }
+        expected = {
+            (index, today_column)
+            for index, row in enumerate(rows)
+            if index > 0
+            and not is_blank(row["Today"])
+            and not is_blank(row[dates[0]])
+            and row["Today"] != row[dates[0]]
+            and (row["Today"] > row[dates[0]]) == higher
+        }
+        check(f"{color} is applied only to the matching Today comparisons", actual == expected)
+
+
+@pytest.mark.parametrize(
+    ("current", "previous", "expected"),
+    [
+        (20, 10, "color: #1b9e5a"),
+        (10, 20, "color: #e63946"),
+        (10, 10, ""),
+        (None, 10, ""),
+        (10, None, ""),
+        (-10, -20, "color: #1b9e5a"),
+    ],
+)
+def test_today_colors_handle_unchanged_and_missing_values(current, previous, expected):
+    import pandas as pd
+
+    from app import today_colors
+
+    row = pd.Series({"Today": current, "2026-10-01": previous}, name=2)
+    check(
+        "Today uses the comparison color or normal text",
+        today_colors(row, "2026-10-01") == [expected, ""],
+    )
+    row.name = 0
+    check(
+        "change summary keeps its independent coloring", today_colors(row, "2026-10-01") == ["", ""]
+    )
+
+
+def test_asset_callbacks_skip_summary_rows(monkeypatch):
+    from app import apply_toggles, open_workings
+
+    state = {
+        "assets_editor": {
+            "edited_rows": {
+                0: {"In total": False},
+                1: {"In total": False},
+                2: {"In total": False},
+                3: {"In total": False},
+            }
+        }
+    }
+    monkeypatch.setattr(st, "session_state", state)
+    apply_toggles(("first", "last"))
+    check("checkboxes map only asset rows to their keys", state["excluded"] == {"first", "last"})
+    for row in (0, 1):
+        state["inspect_btn"] = {"row": row}
+        open_workings(("first", "last"))
+    check("summary rows cannot open workings", "inspect_key" not in state)
+    for row, key in [(2, "first"), (3, "last")]:
+        state["inspect_btn"] = {"row": row}
+        open_workings(("first", "last"))
+        check(f"workings map to {key}", state["inspect_key"] == key)
+
+
 def test_assets_table(fresh, dates, ordered):
     """The assets table's shape, ordering and whole-unit formatting."""
     at = fresh.at
@@ -248,22 +434,22 @@ def test_assets_table(fresh, dates, ordered):
         "form and two summary tables are rendered", len(at.dataframe) == 3, str(len(at.dataframe))
     )
     check(
-        "the total is the first row",
-        assets_table[0]["Asset"].startswith("Total"),
-        assets_table[0]["Asset"],
+        "the total follows the change row",
+        assets_table[1]["Asset"].startswith("Total"),
+        assets_table[1]["Asset"],
     )
     check(
         "the total names the selected currency",
-        assets_table[0]["Asset"].endswith("(AUD)"),
-        assets_table[0]["Asset"],
+        assets_table[1]["Asset"].endswith("(AUD)"),
+        assets_table[1]["Asset"],
     )
-    asset_cols = [c for c in assets_table[0] if c not in ("Asset", "In total", "How")]
+    asset_cols = [c for c in assets_table[1] if c not in ("Asset", "In total", "How")]
     check(
         "the tick column leads, so the toggle sits beside the assets",
-        next(iter(assets_table[0])) == "In total",
-        str(list(assets_table[0])[:2]),
+        next(iter(assets_table[1])) == "In total",
+        str(list(assets_table[1])[:2]),
     )
-    columns = list(assets_table[0])
+    columns = list(assets_table[1])
     check(
         "the workings button follows the asset name",
         columns.index("How") == columns.index("Asset") + 1,
@@ -276,14 +462,14 @@ def test_assets_table(fresh, dates, ordered):
     )
     check(
         "the estimated current net worth matches the Today total",
-        at.metric[0].value == f"AUD {assets_table[0]['Today']:,}",
-        f"{at.metric[0].value} vs {assets_table[0]['Today']}",
+        at.metric[0].value == f"AUD {assets_table[1]['Today']:,}",
+        f"{at.metric[0].value} vs {assets_table[1]['Today']}",
     )
     check(
         "one row per catalogue entry, in currency-then-type order",
-        [r["Asset"] for r in assets_table[1:]]
+        [r["Asset"] for r in assets_table[2:]]
         == [f"{TYPE_EMOJI[s.type]} {flag_of(s.currency)} {s.label}" for s in ordered],
-        str([r["Asset"] for r in assets_table[1:]][:3]),
+        str([r["Asset"] for r in assets_table[2:]][:3]),
     )
 
     # The table is handed a pandas Styler, which both greys excluded rows and takes
@@ -315,11 +501,11 @@ def test_workings_column(fresh):
     at = fresh.at
     assets_table = fresh.assets
 
-    # The total has no workings of its own, and every asset row offers the panel.
+    # Summary rows have no workings of their own; every asset row offers the panel.
     check(
-        "every asset row offers it, and only the total goes without",
-        assets_table[0]["How"] == ""
-        and all(r["How"] == ":material/info:" for r in assets_table[1:]),
+        "every asset row offers it, and both summaries go without",
+        all(row["How"] == "" for row in assets_table[:2])
+        and all(r["How"] == ":material/info:" for r in assets_table[2:]),
         str([r["How"] for r in assets_table[:3]]),
     )
     check(
@@ -351,7 +537,7 @@ def test_workings_column(fresh):
             if "rgba(255,193,7,0.2)" in block
             for row in re.findall(r"_row(\d+)_col", block)
         }
-        == {0},
+        == {1},
         asset_frame(at).proto.arrow_data.styler.styles,
     )
     bold_cells = {
@@ -362,7 +548,7 @@ def test_workings_column(fresh):
     }
     check(
         "only the total row's Today cell is bold",
-        bold_cells == {(0, list(fresh.assets[0]).index("Today"))},
+        bold_cells == {(1, list(fresh.assets[1]).index("Today"))},
         str(bold_cells),
     )
 
@@ -398,13 +584,13 @@ def test_ordering(fresh, ordered):
                 f"{ccy}/{kind} keeps catalogue order", in_file == on_page, f"{on_page} vs {in_file}"
             )
     check(
-        "the total row is still first",
-        assets_table[0]["Asset"].startswith("Total"),
-        assets_table[0]["Asset"],
+        "the total row follows the change row",
+        assets_table[1]["Asset"].startswith("Total"),
+        assets_table[1]["Asset"],
     )
     check(
         "the row count still matches the catalogue",
-        len(assets_table) == len(portfolio.specs) + 1,
+        len(assets_table) == len(portfolio.specs) + 2,
         str(len(assets_table)),
     )
 
@@ -419,7 +605,7 @@ def test_marks(fresh, ordered, dates, latest):
     portfolio = fresh.portfolio
     row_specs = ordered
     snapshots_newest_first = dates
-    labels = [r["Asset"] for r in assets_table[1:]]
+    labels = [r["Asset"] for r in assets_table[2:]]
     marked = dict(zip((s.key for s in row_specs), labels, strict=True))
 
     # The flags are the part that can be wrong rather than merely unattractive.
@@ -448,13 +634,13 @@ def test_marks(fresh, ordered, dates, latest):
         "every asset row is <emoji> <flag> <name>",
         all(
             r["Asset"] == f"{TYPE_EMOJI[s.type]} {flag_of(s.currency)} {s.label}"
-            for r, s in zip(assets_table[1:], row_specs, strict=True)
+            for r, s in zip(assets_table[2:], row_specs, strict=True)
         ),
         str(labels[:2]),
     )
     check(
         "...and still ends in the plain name",
-        all(r["Asset"].endswith(s.label) for r, s in zip(assets_table[1:], row_specs, strict=True)),
+        all(r["Asset"].endswith(s.label) for r, s in zip(assets_table[2:], row_specs, strict=True)),
     )
     check(
         "no row is left unflagged when its currency is known",
@@ -466,8 +652,8 @@ def test_marks(fresh, ordered, dates, latest):
     )
     check(
         "the total row carries no marks -- it is not an asset",
-        not any(ch in assets_table[0]["Asset"] for ch in "".join(TYPE_EMOJI.values())),
-        assets_table[0]["Asset"],
+        not any(ch in assets_table[1]["Asset"] for ch in "".join(TYPE_EMOJI.values())),
+        assets_table[1]["Asset"],
     )
     check(
         "the second table is not marked up, only the first",
@@ -475,12 +661,12 @@ def test_marks(fresh, ordered, dates, latest):
     )
     check(
         "a held asset has a number, not a blank",
-        assets_table[1][snapshots_newest_first[0]] is not None,
+        assets_table[2][snapshots_newest_first[0]] is not None,
     )
 
     # The important one: the rendered total must be the model's total, not something
     # the page computed on its own.
-    shown = assets_table[0][snapshots_newest_first[0]]
+    shown = assets_table[1][snapshots_newest_first[0]]
     model_total = portfolio.total_in(latest, "AUD")
     check(
         "the shown total is the model's total, to the nearest unit",
@@ -520,7 +706,7 @@ def test_marks(fresh, ordered, dates, latest):
     # half a unit per row rather than exactly.
     model_sum = sum(portfolio.value_in(latest, s.key, "AUD") or 0.0 for s in portfolio.specs)
     rows_shown = sum(
-        assets_table[i + 1][snapshots_newest_first[0]] or 0 for i in range(len(portfolio.specs))
+        assets_table[i + 2][snapshots_newest_first[0]] or 0 for i in range(len(portfolio.specs))
     )
     check(
         "the asset column sums to the shown total, within rounding",
@@ -531,14 +717,14 @@ def test_marks(fresh, ordered, dates, latest):
     # A spot check computed independently of the page's helper.
     check(
         "a known holding rounds correctly",
-        assets_table[1][snapshots_newest_first[0]]
+        assets_table[2][snapshots_newest_first[0]]
         == round(portfolio.value_in(latest, "ubank-tomomi", "AUD")),
-        str(assets_table[1][snapshots_newest_first[0]]),
+        str(assets_table[2][snapshots_newest_first[0]]),
     )
     check(
         "a negative holding rounds away from zero symmetrically",
-        assets_table[3][snapshots_newest_first[0]] == -639852,
-        str(assets_table[3][snapshots_newest_first[0]]),
+        assets_table[4][snapshots_newest_first[0]] == -639852,
+        str(assets_table[4][snapshots_newest_first[0]]),
     )
 
 
@@ -554,8 +740,8 @@ def test_live_column(fresh, ordered, dates):
 
     # The fake marks double every close, so anything re-marked must move and anything
     # carried must not. That is what separates the two kinds of number on this row.
-    TODAY_TOTAL = assets_table[0]["Today"]
-    LATEST_TOTAL = assets_table[0][snapshots_newest_first[0]]
+    TODAY_TOTAL = assets_table[1]["Today"]
+    LATEST_TOTAL = assets_table[1][snapshots_newest_first[0]]
 
     check("the live column has its own total", TODAY_TOTAL is not None, str(TODAY_TOTAL))
     check(
@@ -564,7 +750,7 @@ def test_live_column(fresh, ordered, dates):
         f"{TODAY_TOTAL} vs {LATEST_TOTAL}",
     )
 
-    cash_row = next(r for r in assets_table[1:] if "UBank" in r["Asset"])
+    cash_row = next(r for r in assets_table[2:] if "UBank" in r["Asset"])
     check(
         "a cash balance is carried at face value, so it does not move",
         cash_row["Today"] == cash_row[snapshots_newest_first[0]],
@@ -574,21 +760,21 @@ def test_live_column(fresh, ordered, dates):
     # A "stocks" asset is not necessarily a quantity: Commsec is an amount, so it
     # sits this out. Only the ticker-backed holdings are re-marked.
     tickered = {s.key for s in row_specs if s.type == "stocks" and s.ticker}
-    share_rows = [r for r, s in zip(assets_table[1:], row_specs, strict=True) if s.key in tickered]
+    share_rows = [r for r, s in zip(assets_table[2:], row_specs, strict=True) if s.key in tickered]
     check(
         "every share holding with a ticker was re-marked, so it moves",
         all(r["Today"] != r[snapshots_newest_first[0]] for r in share_rows),
         str([(r["Asset"], r["Today"], r[snapshots_newest_first[0]]) for r in share_rows]),
     )
     check("...and none of them is blank", all(not is_blank(r["Today"]) for r in share_rows))
-    carried = next(r for r in assets_table[1:] if "Commsec" in r["Asset"])
+    carried = next(r for r in assets_table[2:] if "Commsec" in r["Asset"])
     check(
         "a share account held as an amount is carried, like cash",
         carried["Today"] == carried[snapshots_newest_first[0]],
         str(carried["Today"]),
     )
 
-    cells = [r["Today"] for r in assets_table[1:]]
+    cells = [r["Today"] for r in assets_table[2:]]
     check(
         "the live total is the sum of its own cells, within rounding",
         abs(sum(v for v in cells if not is_blank(v)) - TODAY_TOTAL) <= len(cells),
@@ -634,7 +820,7 @@ def test_live_column_missing_price(ordered, dates):
     recs = table_records(asset_frame(at))
     msft_rows = [
         r
-        for r in recs[1:]
+        for r in recs[2:]
         if "Microsoft" in r["Asset"] or "Fidelity" in r["Asset"] or "Morgan" in r["Asset"]
     ]
     check(
@@ -649,8 +835,8 @@ def test_live_column_missing_price(ordered, dates):
     )
     check(
         "...and the total is blank rather than short by an unknown amount",
-        is_blank(recs[0]["Today"]),
-        str(recs[0]["Today"]),
+        is_blank(recs[1]["Today"]),
+        str(recs[1]["Today"]),
     )
     check(
         "the page says which prices did not come back",
@@ -681,11 +867,11 @@ def test_live_column_no_rates(dates, ordered):
         not at.exception,
         str([e.value for e in at.exception]),
     )
-    cols = [c for c in table_records(asset_frame(at))[0] if c not in ("Asset", "In total", "How")]
+    cols = [c for c in table_records(asset_frame(at))[1] if c not in ("Asset", "In total", "How")]
     check("the live column is dropped rather than shown empty", cols == dates, str(cols))
     check(
         "the snapshots still render",
-        len(table_records(asset_frame(at))) == 17,
+        len(table_records(asset_frame(at))) == len(ordered) + 2,
         str(len(table_records(asset_frame(at)))),
     )
     check(
@@ -767,9 +953,9 @@ def test_per_currency_table(fresh, dates):
         check(
             "the live row agrees with the live column above it",
             live_total["AUD"] is not None
-            and assets_table[0]["Today"] is not None
-            and abs(live_total["AUD"] - assets_table[0]["Today"]) <= 0.5,
-            f"{live_total['AUD']} vs {assets_table[0]['Today']}",
+            and assets_table[1]["Today"] is not None
+            and abs(live_total["AUD"] - assets_table[1]["Today"]) <= 0.5,
+            f"{live_total['AUD']} vs {assets_table[1]['Today']}",
         )
         check(
             "...in every currency, not just AUD",
@@ -793,7 +979,7 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     model_total = personal.total_in(latest, "AUD")
     base = personal.currencies[0]
     tick_spec = next(s for s in ordered if personal.value_in(latest, s.key, base) not in (None, 0))
-    tick_row = ordered.index(tick_spec) + 1  # the total row leads the table
+    tick_row = ordered.index(tick_spec) + 2
 
     ticked = run()
     check(
@@ -801,8 +987,8 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     )
     check(
         "so the heading counts nothing out",
-        table_records(asset_frame(ticked))[0]["Asset"] == f"Total ({base})",
-        table_records(asset_frame(ticked))[0]["Asset"],
+        table_records(asset_frame(ticked))[1]["Asset"] == f"Total ({base})",
+        table_records(asset_frame(ticked))[1]["Asset"],
     )
 
     ticked.session_state["excluded"] = {tick_spec.key}
@@ -820,13 +1006,13 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     )
     check(
         "...while every other asset stays ticked",
-        all(r["In total"] is True for i, r in enumerate(rows) if i not in (0, tick_row)),
+        all(r["In total"] is True for i, r in enumerate(rows) if i not in (0, 1, tick_row)),
         str([(r["Asset"], r["In total"]) for r in rows if r["In total"] is not True]),
     )
     check(
-        "the total row offers no tick to make",
-        rows[0]["In total"] is None,
-        str(rows[0]["In total"]),
+        "summary rows offer no tick to make",
+        all(row["In total"] is None for row in rows[:2]),
+        str([row["In total"] for row in rows[:2]]),
     )
     css = asset_frame(ticked).proto.arrow_data.styler.styles
     check(
@@ -843,13 +1029,13 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     )
     check(
         "the heading counts what is left out",
-        rows[0]["Asset"] == f"Total excluding 1 asset ({base})",
-        rows[0]["Asset"],
+        rows[1]["Asset"] == f"Total excluding 1 asset ({base})",
+        rows[1]["Asset"],
     )
 
     left_out = personal.value_in(latest, tick_spec.key, base)
     want = model_total - (left_out or 0.0)
-    tick_shown = rows[0][snapshots_newest_first[0]]
+    tick_shown = rows[1][snapshots_newest_first[0]]
     check(
         "the total drops the ticked-out holding",
         abs(tick_shown - want) <= 0.5,
@@ -896,13 +1082,13 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         for s in ordered
         if s is not tick_spec and personal.value_in(latest, s.key, base) not in (None, 0)
     )
-    other_row = ordered.index(other) + 1
+    other_row = ordered.index(other) + 2
     ticked.session_state["excluded"] = {tick_spec.key, other.key}
     ticked.run()
     check(
         "two assets left out are counted as two",
-        table_records(asset_frame(ticked))[0]["Asset"] == f"Total excluding 2 assets ({base})",
-        table_records(asset_frame(ticked))[0]["Asset"],
+        table_records(asset_frame(ticked))[1]["Asset"] == f"Total excluding 2 assets ({base})",
+        table_records(asset_frame(ticked))[1]["Asset"],
     )
     check(
         "each of them is greyed out on its own row",
@@ -929,11 +1115,11 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
         rows[tick_row]["Asset"] == label_of(tick_spec),
         rows[tick_row]["Asset"],
     )
-    check("the heading is plain again", rows[0]["Asset"] == f"Total ({base})", rows[0]["Asset"])
+    check("the heading is plain again", rows[1]["Asset"] == f"Total ({base})", rows[1]["Asset"])
     check(
         "the total counts it again",
-        abs(rows[0][snapshots_newest_first[0]] - model_total) <= 0.5,
-        f"{rows[0][snapshots_newest_first[0]]} vs {model_total}",
+        abs(rows[1][snapshots_newest_first[0]] - model_total) <= 0.5,
+        f"{rows[1][snapshots_newest_first[0]]} vs {model_total}",
     )
     check("the notice goes away", not ticked.info, str([i.value for i in ticked.info]))
 
@@ -945,7 +1131,7 @@ def test_sidebar_currency(fresh, dates):
     """Switching the sidebar currency re-totals without touching the rest."""
     currency_table = fresh.currency
     snapshots_newest_first = dates
-    shown = fresh.assets[0][snapshots_newest_first[0]]
+    shown = fresh.assets[1][snapshots_newest_first[0]]
     usd = run()
     usd.sidebar.radio[0].set_value("USD").run()
     check(
@@ -956,13 +1142,13 @@ def test_sidebar_currency(fresh, dates):
     usd_rows = table_records(asset_frame(usd))
     check(
         "the total row follows the selected currency",
-        usd_rows[0]["Asset"].endswith("(USD)"),
-        usd_rows[0]["Asset"],
+        usd_rows[1]["Asset"].endswith("(USD)"),
+        usd_rows[1]["Asset"],
     )
     check(
         "switching currency actually changes the total",
-        usd_rows[0][snapshots_newest_first[0]] != shown,
-        f"{usd_rows[0][snapshots_newest_first[0]]} vs {shown}",
+        usd_rows[1][snapshots_newest_first[0]] != shown,
+        f"{usd_rows[1][snapshots_newest_first[0]]} vs {shown}",
     )
     usd_cur = table_records(currency_frame(usd))
     check(
@@ -1022,7 +1208,7 @@ def test_unmapped_currency_marks(tmp_path, monkeypatch):
         not at.exception,
         str([e.value for e in at.exception]),
     )
-    rows = table_records(asset_frame(at))[1:]
+    rows = table_records(asset_frame(at))[2:]
     check(
         "an unmapped currency gets no flag, and no stray space",
         rows[0]["Asset"] == f"{TYPE_EMOJI['other']} Gold",
@@ -1084,10 +1270,10 @@ def test_switching_files(tmp_path, monkeypatch):
     rows = table_records(asset_frame(at))
     check(
         "the tick is applied in the first file",
-        rows[1]["In total"] is False,
-        str(rows[1]["In total"]),
+        rows[2]["In total"] is False,
+        str(rows[2]["In total"]),
     )
-    check("...and the total says so", "excluding 1 asset" in rows[0]["Asset"], rows[0]["Asset"])
+    check("...and the total says so", "excluding 1 asset" in rows[1]["Asset"], rows[1]["Asset"])
     at.session_state["inspect_key"] = "a"
     at.run()
     check(
@@ -1102,12 +1288,12 @@ def test_switching_files(tmp_path, monkeypatch):
         str([e.value for e in at.exception]),
     )
     rows = table_records(asset_frame(at))
-    check("the other file is the other file", rows[0]["2026-09-01"] == 500, str(rows[0]))
-    check("...with its own tick left alone", rows[1]["In total"] is True, str(rows[1]["In total"]))
+    check("the other file is the other file", rows[1]["2026-09-01"] == 500, str(rows[1]))
+    check("...with its own tick left alone", rows[2]["In total"] is True, str(rows[2]["In total"]))
     check(
         "...so nothing is left out of its totals",
-        rows[0]["Asset"] == "Total (AUD)",
-        rows[0]["Asset"],
+        rows[1]["Asset"] == "Total (AUD)",
+        rows[1]["Asset"],
     )
     check(
         "...and it does not inherit the other file's notice",
@@ -1143,7 +1329,7 @@ def test_workings_panel(personal, ordered, dates, latest):
     # A USD holding, so its table carries units, price, rate and result; an AUD
     # row exercises the identity-rate case further down.
     fx_spec = next(s for s in ordered if s.type == "stocks" and s.ticker and s.currency != base)
-    fx_row = ordered.index(fx_spec) + 1
+    fx_row = ordered.index(fx_spec) + 2
     panel.session_state["inspect_key"] = fx_spec.key
     panel.run()
     check(
@@ -1217,7 +1403,7 @@ def test_workings_panel(personal, ordered, dates, latest):
     # A flat, same-currency holding: no units, no conversion -- and a negative one
     # after it, because a sign lost in an explanation is a wrong explanation.
     flat = next(s for s in ordered if s.key == "ubank-tomomi")
-    flat_row = ordered.index(flat) + 1
+    flat_row = ordered.index(flat) + 2
     panel.session_state["inspect_key"] = flat.key
     panel.run()
     flat_for = {row["Snapshot"]: row for row in workings_records(panel)}

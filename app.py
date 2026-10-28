@@ -25,6 +25,7 @@ from portfolio_view import (
     build_currency_rows,
     build_pie_frames,
     build_snapshot_editor_rows,
+    build_snapshot_trend_rows,
     build_snapshot_type_rows,
     build_workings_rows,
     holdings_from_editor,
@@ -44,6 +45,8 @@ from snapshots import (
 )
 
 TODAY_COL = "Today"
+TOTAL_ROW = 1
+FIRST_ASSET_ROW = 2
 GREY = "color: #8a8f98; background-color: rgba(128,128,128,0.12)"
 LIVE = "background-color: rgba(62,116,253,0.1)"
 TOTAL = "background-color: rgba(255,193,7,0.2)"
@@ -223,10 +226,15 @@ def render_asset_table(
     asset_keys: tuple[str, ...],
 ) -> None:
     table = pd.DataFrame(rows)
-    style = table.style.apply(grey_out, axis=1).format(show, na_rep="")
+    amount_columns = [
+        column for column in table.columns if column not in ("In total", "Asset", "How")
+    ]
+    table[amount_columns] = table[amount_columns].astype("Int64")
+    style = table.style.apply(grey_out, axis=1).apply(change_colors, axis=1).format(show, na_rep="")
     if live_present:
+        style = style.apply(today_colors, previous_column=amount_columns[1], axis=1)
         style = style.apply(
-            lambda row: [TOTAL_TODAY if row.name == 0 else LIVE] * len(row),
+            lambda row: [TOTAL_TODAY if row.name == TOTAL_ROW else LIVE] * len(row),
             axis=1,
             subset=[TODAY_COL],
         )
@@ -374,23 +382,60 @@ def render_live_status(
         )
 
 
-def render_snapshot_type_chart(rows: list[dict], snapshot_dates: list[str], currency: str, alt):
+def render_snapshot_type_chart(
+    rows: list[dict], snapshot_dates: list[str], currency: str, alt, trend_rows: list[dict]
+):
     if not rows or alt is None:
         return
+    snapshot_axis = alt.X(
+        "date:O",
+        sort=snapshot_dates,
+        title="Snapshot",
+        axis=alt.Axis(
+            labelAngle=0,
+            labelLineHeight=16,
+            labelPadding=8,
+            labelExpr=(
+                "datum.value === 'Today (live)' ? ['Today', '(Live)'] : "
+                "[utcFormat(toDate(datum.value), '%Y'), utcFormat(toDate(datum.value), '%b')]"
+            ),
+        ),
+    )
     chart = (
         alt.Chart(pd.DataFrame(rows))
         .mark_bar()
         .encode(
-            x=alt.X("date:O", sort=snapshot_dates, title="Snapshot"),
+            x=snapshot_axis,
             y=alt.Y("value:Q", stack="zero", title=f"Value ({currency})"),
-            color=alt.Color("type:N", title="Asset type", scale=alt.Scale(scheme="dark2")),
+            color=alt.Color("group:N", title="Currency and type", scale=alt.Scale(scheme="set2")),
+            opacity=alt.condition(
+                alt.datum.status == "Live estimate", alt.value(0.6), alt.value(1)
+            ),
             tooltip=[
                 alt.Tooltip("date:O", title="Snapshot"),
-                alt.Tooltip("type:N", title="Asset type"),
+                alt.Tooltip("status:N", title="Status"),
+                alt.Tooltip("as_of:N", title="As of"),
+                alt.Tooltip("group:N", title="Currency and type"),
                 alt.Tooltip("value:Q", format=",.2f", title=f"Value ({currency})"),
             ],
         )
-        .properties(title=f"Monthly snapshots by type ({currency})", height=320)
+    )
+    if trend_rows:
+        trend = (
+            alt.Chart(pd.DataFrame(trend_rows))
+            .mark_line(color="#e63946", strokeWidth=3, strokeDash=[2, 5], strokeCap="round")
+            .encode(
+                x=snapshot_axis,
+                y=alt.Y("trend:Q", title=f"Value ({currency})"),
+                tooltip=[
+                    alt.Tooltip("date:O", title="Snapshot"),
+                    alt.Tooltip("trend:Q", format=",.2f", title=f"Linear trend ({currency})"),
+                ],
+            )
+        )
+        chart = chart + trend
+    chart = chart.properties(
+        title=f"Monthly snapshots by currency and type ({currency})", height=320
     )
     st.altair_chart(chart, use_container_width=True)
 
@@ -524,13 +569,42 @@ def grey_out(row) -> list[str]:
     """Grey every cell of a row that has been ticked out of the totals.
 
     The tick column holds ``True``/``False`` per asset and ``None`` on the
-    total row, so only an explicit ``False`` matches -- row 0 never greys.
+    summary rows, so only an explicit ``False`` matches -- summaries never grey.
     """
     if row["In total"] is False:
         return [GREY] * len(row)
-    if row.name == 0:
+    if row.name == TOTAL_ROW:
         return [TOTAL] * len(row)
     return [""] * len(row)
+
+
+def change_colors(row) -> list[str]:
+    """Color increases green and decreases red in the change summary only."""
+    styles = []
+    for column, value in row.items():
+        if row.name != 0 or column in ("In total", "Asset", "How") or pd.isna(value):
+            styles.append("")
+        elif value > 0:
+            styles.append("color: #1b9e5a")
+        elif value < 0:
+            styles.append("color: #e63946")
+        else:
+            styles.append("")
+    return styles
+
+
+def today_colors(row, previous_column: str) -> list[str]:
+    """Compare Today with the latest saved value without recoloring history or changes."""
+    styles = [""] * len(row)
+    current = row[TODAY_COL]
+    previous = row[previous_column]
+    if row.name == 0 or pd.isna(current) or pd.isna(previous):
+        return styles
+    if current > previous:
+        styles[row.index.get_loc(TODAY_COL)] = "color: #1b9e5a"
+    elif current < previous:
+        styles[row.index.get_loc(TODAY_COL)] = "color: #e63946"
+    return styles
 
 
 def show(value) -> str:
@@ -560,7 +634,7 @@ def apply_toggles(asset_keys: tuple[str, ...]) -> None:
     Streamlit runs a widget's callback before the script body, so ``excluded``
     already holds the click that triggered this run by the time rows are built.
 
-    The table reports edits by row position with the total first; ``asset_keys``
+    The table reports edits by row position after two summary rows; ``asset_keys``
     maps those positions to stable asset identities.
     """
     state = st.session_state.get("assets_editor")
@@ -569,9 +643,10 @@ def apply_toggles(asset_keys: tuple[str, ...]) -> None:
     excluded_keys: set[str] = st.session_state.setdefault("excluded", set())
     for row, change in state.get("edited_rows", {}).items():
         tick = change.get("In total")
-        if tick is None or not 0 < row <= len(asset_keys):
-            continue  # row 0 is the total, which is not an asset
-        key = asset_keys[row - 1]
+        asset_index = row - FIRST_ASSET_ROW
+        if tick is None or not 0 <= asset_index < len(asset_keys):
+            continue
+        key = asset_keys[asset_index]
         if tick:
             excluded_keys.discard(key)
         else:
@@ -588,33 +663,41 @@ def open_workings(asset_keys: tuple[str, ...]) -> None:
     if not click:
         return
     row = click["row"]
-    if not 0 < row <= len(asset_keys):
+    asset_index = row - FIRST_ASSET_ROW
+    if not 0 <= asset_index < len(asset_keys):
         return
-    asset_key = asset_keys[row - 1]
+    asset_key = asset_keys[asset_index]
     st.session_state["inspect_key"] = (
         None if st.session_state.get("inspect_key") == asset_key else asset_key
     )
 
 
 def main() -> None:
+    # Page setup and sidebar: select the portfolio and display currency.
     st.set_page_config(page_title="Portfolio", layout="wide")
     data_dir = Path(os.environ.get("PORTFOLIO_DIR") or PORTFOLIO_DIR)
     today = dt.date.today().isoformat()
     portfolio, handle, currency = render_sidebar(data_dir)
     render_portfolio_title(portfolio.label or handle)
+    # Reserve space below the title; fill it once today's total is available.
     current_net_worth_slot = st.empty()
 
+    # Empty portfolio: offer snapshot entry instead of charts and tables.
     if not portfolio.snapshots:
         st.subheader(f"Assets over time ({currency})")
         render_snapshot_entry(portfolio, handle, today)
         st.info("Save your first snapshot above to start tracking this portfolio.")
         return
 
+    # Shared view inputs: newest snapshots first, assets grouped by currency/type.
+    # Excluded assets remain visible but do not contribute to any totals.
     snapshots = sorted(portfolio.snapshots, key=lambda snapshot: snapshot.date, reverse=True)
     latest = snapshots[0]
     ordered = sorted(portfolio.specs, key=lambda spec: (spec.currency, spec.type))
     excluded = excluded_assets(portfolio, handle)
     included = {spec.key for spec in ordered} - excluded
+
+    # Today's view: revalue the latest holdings using cached market data, without saving.
     marks, marks_error = today_marks(
         tuple(portfolio.currencies),
         tuple(market.tickers_to_mark(portfolio, latest)),
@@ -625,6 +708,7 @@ def main() -> None:
     if marks is not None:
         live, live_notes = market.virtual_snapshot(portfolio, latest, marks)
 
+    # Overview charts: break down the latest saved snapshot, not today's live values.
     pie_frames = build_pie_frames(portfolio, latest, ordered, included, currency)
     try:
         import altair as alt
@@ -632,6 +716,7 @@ def main() -> None:
         alt = None
     render_pie_charts(pie_frames, alt)
 
+    # Headline metric: show today's included total, or "Unavailable" if incomplete.
     selected = totals_for(portfolio, snapshots, currency, included, live)
     current_net_worth = selected.get(TODAY_COL)
     current_net_worth_slot.metric(
@@ -640,6 +725,7 @@ def main() -> None:
         if current_net_worth is not None
         else "Unavailable",
     )
+    # Assets over time: snapshot-entry form, then the interactive holdings table.
     rows = build_asset_rows(
         portfolio,
         ordered,
@@ -666,6 +752,7 @@ def main() -> None:
         tuple(spec.key for spec in ordered),
     )
 
+    # Optional workings panel: explain the asset selected with the table's How button.
     inspect_key = st.session_state.get("inspect_key")
     inspected = next((spec for spec in ordered if spec.key == inspect_key), None)
     if inspected is not None:
@@ -683,13 +770,24 @@ def main() -> None:
             row_label(inspected), workings_rows, inspected.ticker, inspected.currency, currency
         )
 
+    # Supporting notes: table conventions and live-data availability or failures.
     render_table_explanation()
     render_live_status(live, marks, live_notes, marks_error, latest_date=latest.date, today=today)
 
-    type_snapshot_rows = build_snapshot_type_rows(portfolio, snapshots, ordered, included, currency)
+    # Compare recorded history with today's estimate; fit the trend to recorded totals only.
+    type_snapshot_rows = build_snapshot_type_rows(
+        portfolio, snapshots, ordered, included, currency, live=live
+    )
     snapshot_dates = sorted(snapshot.date for snapshot in portfolio.snapshots)
-    render_snapshot_type_chart(type_snapshot_rows, snapshot_dates, currency, alt)
+    trend_rows = build_snapshot_trend_rows({on: selected[on] for on in snapshot_dates})
+    chart_dates = snapshot_dates + (
+        ["Today (live)"]
+        if any(row["status"] == "Live estimate" for row in type_snapshot_rows)
+        else []
+    )
+    render_snapshot_type_chart(type_snapshot_rows, chart_dates, currency, alt, trend_rows)
 
+    # Currency comparison: express each snapshot and today's view in every currency.
     per_currency = {
         code: totals_for(portfolio, snapshots, code, included, live)
         for code in portfolio.currencies
