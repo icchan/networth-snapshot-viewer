@@ -135,6 +135,36 @@ def check_fx(value: object, currencies: list[str], where: str) -> dict[str, dict
     }
 
 
+def _fx_missing_pairs(value: object, currencies: list[str]) -> bool:
+    """Whether an absent FX matrix or pair should be refetched during load."""
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+
+    known = set(currencies)
+    if any(not isinstance(source, str) or source.upper() not in known for source in value):
+        return False
+    rows = {source.upper(): row for source, row in value.items()}
+    if any(not isinstance(row, dict) for row in rows.values()):
+        return False
+    if any(
+        not isinstance(target, str) or target.upper() not in known
+        for row in rows.values()
+        for target in row
+    ):
+        return False
+
+    for source in currencies:
+        row = rows.get(source)
+        if row is None:
+            return True
+        targets = {target.upper() for target in row if isinstance(target, str)}
+        if any(target not in targets for target in currencies):
+            return True
+    return False
+
+
 #: The asset types the app understands. Fixed in code so a type means the same
 #: thing everywhere.
 TYPE_CASH = "cash"
@@ -734,6 +764,23 @@ def load_file(path: Path | str) -> Portfolio:
     if not isinstance(entries, list):
         raise SnapshotError(f"{path}: 'snapshots' must be a list")
 
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or "date" not in entry:
+            continue
+        if not _fx_missing_pairs(entry.get("fx"), currencies):
+            continue
+
+        snapshot_date = check_date(entry["date"], f"{path}: snapshots[{index}]")
+        data_date = min(snapshot_date, dt.date.today().isoformat())
+        from fx import fetch_fx
+
+        fetched = fetch_fx(dt.date.fromisoformat(data_date), currencies)
+        entry["fx"] = fetched.rates
+        print(
+            f"note: snapshot {snapshot_date} had missing FX; refetched rates using "
+            f"data available on or before {data_date}"
+        )
+
     snapshots = [
         Snapshot.from_dict(entry, currencies, catalogue, f"{path}: snapshots[{index}]")
         for index, entry in enumerate(entries)
@@ -809,6 +856,7 @@ def create_snapshot(
     price_url: str | None = None,
     cache_path: Path | str | None = None,
     fx_url: str | None = None,
+    market_data_date: str | None = None,
 ) -> Snapshot:
     """Build a snapshot for `date`, filling in stock prices and exchange rates.
 
@@ -818,17 +866,18 @@ def create_snapshot(
     per snapshot.
 
     For a stock you supply only ``ref`` and ``units``; the close on or before
-    `date` is looked up from the spec's ticker and written into the snapshot, so
-    the stored record never has to be fetched again. ``value`` is left out of the
-    file because it is just ``units * price``.
+    ``market_data_date`` (or ``date`` if omitted) is looked up from the spec's
+    ticker and written into the snapshot, so the stored record never has to be
+    fetched again. ``value`` is left out of the file because it is just
+    ``units * price``.
 
-    Leave ``fx`` out and the exchange rates for `date` are fetched too, giving
-    you the whole snapshot from the date and the holdings. Pass ``fx`` yourself
-    and no rate lookup happens at all.
+    Leave ``fx`` out and exchange rates for ``market_data_date`` (or ``date`` if
+    omitted) are fetched too. The snapshot keeps ``date`` as its record date;
+    ``market_data_date`` lets a future snapshot use the latest available market
+    data. Pass ``fx`` yourself and no rate lookup happens at all.
 
-    Nothing here is ever refreshed later. Prices and rates are recorded when the
-    snapshot is built and left alone afterwards, so a snapshot's totals keep
-    meaning what they meant the day it was written.
+    Rates and prices are frozen after creation unless the caller deliberately
+    rebuilds the snapshot. The loader repairs a missing or incomplete FX matrix.
 
     ``price_overrides`` maps ticker to a hand-entered price. That price wins over
     the lookup, which is how you cover an instrument the price source doesn't
@@ -842,17 +891,18 @@ def create_snapshot(
     from prices import PriceError, close_on
 
     date = check_date(date, "create_snapshot")
+    data_date = check_date(market_data_date or date, "create_snapshot market_data_date")
     codes = check_currencies(currencies)
     catalogue = _catalogue(specs, codes, "create_snapshot: specs")
 
     if fx is None:
         from fx import fetch_fx
 
-        fetched = fetch_fx(dt.date.fromisoformat(date), codes, url=fx_url or DEFAULT_FX_URL)
+        fetched = fetch_fx(dt.date.fromisoformat(data_date), codes, url=fx_url or DEFAULT_FX_URL)
         fx = fetched.rates
         if fetched.stale:
             print(
-                f"note: no rates for {date} itself, using {fetched.rate_date} "
+                f"note: no rates for {data_date} itself, using {fetched.rate_date} "
                 f"(weekends and holidays have no rates)"
             )
     fx = check_fx(fx, codes, "create_snapshot")
@@ -890,7 +940,7 @@ def create_snapshot(
             if cache_path is not None:
                 kwargs["cache_path"] = cache_path
             try:
-                quote = close_on(ticker, date, **kwargs)
+                quote = close_on(ticker, data_date, **kwargs)
             except PriceError as exc:
                 problems.append(str(exc))
                 continue

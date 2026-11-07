@@ -10,6 +10,7 @@ from portfolio_view import (
     build_snapshot_trend_rows,
     build_snapshot_type_rows,
     holdings_from_editor,
+    previous_month_snapshot,
     snapshot_month_options,
     whole,
 )
@@ -110,7 +111,28 @@ def test_whole_rounds_half_away_from_zero():
 def test_snapshot_month_options_cover_history_through_today(personal):
     months = snapshot_month_options(personal.snapshots, "2026-10-10")
     check("months are newest first", months == sorted(months, reverse=True), str(months))
-    check("saved months and the current month are available", {"2026-05", "2026-10"} <= set(months))
+    check(
+        "saved, current, and next month are available",
+        {"2026-05", "2026-10", "2026-11"} <= set(months),
+    )
+    check("months beyond next month are not offered", "2026-12" not in months)
+
+
+def test_snapshot_month_options_roll_over_at_year_end():
+    months = snapshot_month_options([], "2026-12-31")
+    check("next month rolls into the next year", months == ["2027-01", "2026-12"])
+
+
+def test_previous_month_snapshot_selects_latest_from_exact_previous_month(personal):
+    previous = previous_month_snapshot(personal.snapshots, "2026-10")
+    check(
+        "snapshot from immediately preceding month is selected",
+        previous is not None and previous.date[:7] == "2026-09",
+    )
+    check(
+        "no snapshot is borrowed across a gap",
+        previous_month_snapshot(personal.snapshots, "1900-02") is None,
+    )
 
 
 def test_snapshot_editor_rows_prefill_existing_holdings(personal):
@@ -132,6 +154,26 @@ def test_snapshot_editor_rows_prefill_existing_holdings(personal):
         stock["Units"] is not None and stock["Price override"] is None,
     )
     check("assets absent from the snapshot are unchecked", not absent["Held"])
+
+    template_rows = build_snapshot_editor_rows(
+        personal.specs, None, lambda spec: spec.label, partial
+    )
+    template_by_key = {row["key"]: row for row in template_rows}
+    template_stock = template_by_key["msft-ian"]
+    check(
+        "new snapshot copies held and entry from template",
+        template_stock["Held"] and template_stock["Entry"] == "Units & price",
+    )
+    check(
+        "new snapshot does not copy previous amounts or price overrides",
+        template_stock["Value"] is None
+        and template_stock["Units"] is None
+        and template_stock["Price override"] is None,
+    )
+    check(
+        "new snapshot keeps previous-month absent assets unchecked",
+        not template_by_key[absent_spec.key]["Held"],
+    )
 
 
 def test_holdings_from_editor_builds_values_and_unit_rows():

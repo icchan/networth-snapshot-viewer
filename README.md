@@ -104,9 +104,9 @@ moving it into place. `PortfolioError` subclasses `SnapshotError`, so a single
 
 Each snapshot is one dated point in time:
 
-- **A snapshot stores its own rates.** Converting a snapshot's numbers always uses the
-  rates that were true on its own date, so history is never retroactively repriced by
-  later rate moves.
+- **A snapshot stores its own rates.** Historical snapshots use rates for their date.
+  A future snapshot uses the latest available rates when it is created, and keeps them
+  frozen until you explicitly refresh it.
 - **`monthyear` is not stored.** It is derived from `date` on demand
   (`snapshot.monthyear`, `monthyear("2026-09-30")`). Storing it only gave it a second
   way to disagree with the date, and a file that still contains it is rejected with a
@@ -308,11 +308,7 @@ Rules, chosen deliberately:
 - **The fetched matrix is checked against the same rules a hand-written one must pass**,
   so anything `fetch_fx` returns is always safe to store.
 
-### Rates are frozen once written
-
-There is no refresh. A snapshot's rates are recorded when it is built and never
-re-fetched, so a correct rate today can never silently change what a past total meant.
-If a stored matrix turns out to be wrong, editing that snapshot is a deliberate act:
+### Rates are frozen unless explicitly refreshed
 
 ```python
 store = load("personal")
@@ -320,9 +316,11 @@ store.snapshots[0].fx = fetch_fx(date(2026, 8, 31), store.currencies).rates
 save(store)
 ```
 
-Because `fx` is required, a snapshot with a broken matrix cannot exist on disk — so there
-is no "fill in the rates later" path, by design. Rates must be right when the snapshot is
-made.
+A complete matrix is not refetched during load. If the `fx` matrix or any currency pair
+is missing, load fetches a complete replacement for that snapshot date (using the latest
+available data for a future snapshot). This repair is in memory only; it does not write
+to the YAML file. Invalid present rates are still rejected. In the UI, **Refresh market
+data** deliberately fetches rates and ticker prices again and saves the result.
 
 ## Stocks and prices
 
@@ -548,6 +546,15 @@ Increases are green, decreases red, and zero is neutral. The oldest comparison a
 comparisons with unavailable totals stay blank. Changes use unrounded totals and
 respect asset exclusions. Underneath, the same totals are expressed in every currency
 the portfolio declares.
+
+The snapshot editor offers the current month and the next month. A future snapshot
+keeps its selected date, but uses the latest market data available today for missing
+ticker prices and its initial FX matrix. Select a saved snapshot and choose **Refresh
+market data** to deliberately fetch its FX matrix and tickered holding prices again;
+the snapshot date and fixed-value holdings remain unchanged. Refresh replaces stored
+prices for all tickered holdings recorded as units and price.
+When creating a new month, the editor copies the previous month's held status and entry
+mode when a snapshot exists, but leaves amounts and prices blank.
 
 Deliberate choices:
 

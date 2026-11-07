@@ -1569,32 +1569,43 @@ def test_snapshot_entry_creates_and_updates_snapshot(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("PORTFOLIO_DIR", str(tmp_path))
 
+    fx_calls = []
+    price_calls = []
+    current_price = 100.0
+    rate_factor = 1.0
+
     def fake_fetch_fx(on, currencies, **kwargs):
+        fx_calls.append(on)
         codes = list(currencies)
         rates = {
             source: {
-                target: 1.0 if source == target else (0.65 if source == "AUD" else 1.54)
+                target: 1.0
+                if source == target
+                else (0.65 * rate_factor if source == "AUD" else 1.54 / rate_factor)
                 for target in codes
             }
             for source in codes
         }
         return FxRates(on.isoformat(), on.isoformat(), rates)
 
-    monkeypatch.setattr("fx.fetch_fx", fake_fetch_fx)
-    monkeypatch.setattr(
-        prices,
-        "close_on",
-        lambda ticker, on, **kwargs: prices.Quote(
+    def fake_close_on(ticker, on, **kwargs):
+        price_calls.append(on)
+        return prices.Quote(
             ticker=ticker,
-            price=100.0,
+            price=current_price,
             price_date=on,
             currency="USD",
             as_of=on,
-        ),
-    )
+        )
+
+    monkeypatch.setattr("fx.fetch_fx", fake_fetch_fx)
+    monkeypatch.setattr(prices, "close_on", fake_close_on)
 
     at = run()
     month = at.selectbox[0].value
+    today = dt.date.today().isoformat()
+    next_month = (dt.date.today().replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    check("next month is the default selection", month == next_month.strftime("%Y-%m"))
     editor = snapshot_entry_frame(at)
     row_for = {key: index for index, key in enumerate(editor.value.index)}
     at.session_state[editor.key] = {
@@ -1622,6 +1633,11 @@ def test_snapshot_entry_creates_and_updates_snapshot(tmp_path, monkeypatch):
     )
     if snapshot is None:
         return
+    check(
+        "future snapshot fetches latest available FX date",
+        fx_calls == [dt.date.fromisoformat(today)],
+    )
+    check("future snapshot fetches latest available ticker price", price_calls == [today])
     cash = next(asset for asset in snapshot.assets if asset.ref == "cash")
     shares = next(asset for asset in snapshot.assets if asset.ref == "shares")
     check("flat values are stored", cash.value == 1200.0, str(cash))
@@ -1635,7 +1651,10 @@ def test_snapshot_entry_creates_and_updates_snapshot(tmp_path, monkeypatch):
     editor = snapshot_entry_frame(at)
     row_for = {key: index for index, key in enumerate(editor.value.index)}
     at.session_state[editor.key] = {
-        "edited_rows": {row_for["cash"]: {"Value": 2300.0}},
+        "edited_rows": {
+            row_for["cash"]: {"Value": 2300.0},
+            row_for["shares"]: {"Price override": 90.0},
+        },
         "added_rows": [],
         "deleted_rows": [],
     }
@@ -1651,5 +1670,39 @@ def test_snapshot_entry_creates_and_updates_snapshot(tmp_path, monkeypatch):
         "the edited value is persisted", snapshot is not None and snapshot.assets[0].value == 2300.0
     )
     check(
+        "the edited price override is persisted",
+        snapshot is not None
+        and next(asset for asset in snapshot.assets if asset.ref == "shares").price == 90.0,
+    )
+    check(
         "editing keeps the snapshot's FX matrix", snapshot is not None and snapshot.fx == frozen_fx
     )
+
+    current_price = 125.0
+    rate_factor = 1.1
+    at.button[1].click().run()
+    check(
+        "refreshing market data has no app error",
+        not at.exception,
+        str([e.value for e in at.exception]),
+    )
+    refreshed = load("entry", directory=tmp_path)
+    snapshot = refreshed.by_date(snapshot_date)
+    check(
+        "refresh preserves the future snapshot date",
+        snapshot is not None and snapshot.date == snapshot_date,
+    )
+    check(
+        "refresh replaces ticker prices",
+        snapshot is not None
+        and next(asset for asset in snapshot.assets if asset.ref == "shares").price == 125.0,
+    )
+    check(
+        "refresh replaces frozen FX rates",
+        snapshot is not None and snapshot.fx["AUD"]["USD"] == 0.65 * rate_factor,
+    )
+    check(
+        "future refresh requests latest available FX date",
+        fx_calls[-1] == dt.date.fromisoformat(today),
+    )
+    check("future refresh requests latest available ticker price", price_calls[-1] == today)

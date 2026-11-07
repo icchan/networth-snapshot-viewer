@@ -22,8 +22,13 @@ def whole(amount: float | None) -> int | None:
 
 
 def snapshot_month_options(snapshots: Sequence[Snapshot], today: str) -> list[str]:
-    """List every month from the first saved snapshot through the current/latest month."""
-    months = [snapshot.date[:7] for snapshot in snapshots] + [today[:7]]
+    """List months through next month, retaining any later saved snapshot months."""
+    today_month = date.fromisoformat(f"{today[:7]}-01")
+    next_month = date(today_month.year + (today_month.month == 12), today_month.month % 12 + 1, 1)
+    months = [snapshot.date[:7] for snapshot in snapshots] + [
+        today_month.strftime("%Y-%m"),
+        next_month.strftime("%Y-%m"),
+    ]
     start = date.fromisoformat(f"{min(months)}-01")
     end = date.fromisoformat(f"{max(months)}-01")
     options = []
@@ -34,32 +39,46 @@ def snapshot_month_options(snapshots: Sequence[Snapshot], today: str) -> list[st
     return list(reversed(options))
 
 
+def previous_month_snapshot(snapshots: Sequence[Snapshot], month: str) -> Snapshot | None:
+    """Return the latest snapshot in the month immediately before ``month``."""
+    selected = date.fromisoformat(f"{month}-01")
+    previous = date(selected.year - (selected.month == 1), selected.month - 1 or 12, 1)
+    previous_month = previous.strftime("%Y-%m")
+    matches = [snapshot for snapshot in snapshots if snapshot.date[:7] == previous_month]
+    return max(matches, key=lambda snapshot: snapshot.date, default=None)
+
+
 def build_snapshot_editor_rows(
     specs: Sequence[AssetSpec],
     snapshot: Snapshot | None,
     label_for: Callable[[AssetSpec], str],
+    template: Snapshot | None = None,
 ) -> list[dict]:
-    """Build one editable row per asset, prefilled when editing a snapshot.
+    """Build one editable row per asset, prefilled from a snapshot or template.
 
     Tickered assets leave the price override blank by default, so saving units
-    fetches the historical close unless the user enters an override.
+    fetches the historical close unless the user enters an override. A template
+    copies only held status and entry mode into a new snapshot's form.
     """
-    holdings = {} if snapshot is None else {asset.ref: asset for asset in snapshot.assets}
+    source = snapshot if snapshot is not None else template
+    holdings = {} if source is None else {asset.ref: asset for asset in source.assets}
     rows = []
     for spec in specs:
         holding = holdings.get(spec.key)
+        held = holding is not None
+        entry = "Units & price" if held and holding.value is None else "Value"
         rows.append(
             {
                 "key": spec.key,
                 "Asset": label_for(spec),
-                "Held": holding is not None,
-                "Entry": "Units & price"
-                if holding is not None and holding.value is None
-                else "Value",
-                "Value": None if holding is None else holding.value,
-                "Units": None if holding is None else holding.units,
+                "Held": held,
+                "Entry": entry,
+                "Value": None if snapshot is None or holding is None else holding.value,
+                "Units": None if snapshot is None or holding is None else holding.units,
                 "Price override": (
-                    None if holding is None or spec.ticker is not None else holding.price
+                    None
+                    if snapshot is None or holding is None or spec.ticker is not None
+                    else holding.price
                 ),
             }
         )

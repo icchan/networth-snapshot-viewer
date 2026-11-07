@@ -318,22 +318,6 @@ def test_bad_input():
         SnapshotError,
     )
     raises(
-        "missing fx pair",
-        "missing 1 pair",
-        lambda: load_file(
-            write("""
-currencies: [AUD, USD]
-snapshots:
-  - date: '2026-01-31'
-    fx:
-      AUD: {AUD: 1.0, USD: 0.7}
-      USD: {AUD: 1.4}
-""")
-        ),
-        SnapshotError,
-    )
-
-    raises(
         "identity pair must be 1",
         "must be 1",
         lambda: load_file(
@@ -455,6 +439,43 @@ snapshots:
         "missing snapshots key means empty list",
         load_file(write("currencies: [AUD, USD]\n")).snapshots == [],
     )
+
+
+def test_load_refetches_missing_fx_in_memory(tmp_path, monkeypatch):
+    """Missing/incomplete matrices are repaired on load without writing the YAML."""
+    path = tmp_path / "repair.yaml"
+    original = """\
+currencies: [AUD, USD]
+snapshots:
+  - date: '2026-01-31'
+  - date: '2099-01-31'
+    fx:
+      AUD: {AUD: 1.0, USD: 0.7}
+      USD: {AUD: 1.4}
+"""
+    path.write_text(original, encoding="utf-8")
+    calls = []
+
+    def fake_fetch_fx(on, currencies, **kwargs):
+        calls.append(on)
+        return FxRates(on.isoformat(), on.isoformat(), make_fx(currencies))
+
+    monkeypatch.setattr(fx_mod, "fetch_fx", fake_fetch_fx)
+    repaired = load_file(path)
+    today = dt.date.today()
+
+    check("one fetch repairs each incomplete matrix", len(calls) == 2, str(calls))
+    check("historical repair uses the snapshot date", calls[0] == dt.date(2026, 1, 31))
+    check(
+        "future repair uses latest data through today",
+        calls[1] == today,
+        str(calls[1]),
+    )
+    check(
+        "both loaded snapshots have complete FX",
+        all(snapshot.fx == make_fx(["AUD", "USD"]) for snapshot in repaired.snapshots),
+    )
+    check("repair does not rewrite the YAML on load", path.read_text(encoding="utf-8") == original)
 
 
 def test_keys():

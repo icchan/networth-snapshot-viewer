@@ -29,6 +29,7 @@ from portfolio_view import (
     build_snapshot_type_rows,
     build_workings_rows,
     holdings_from_editor,
+    previous_month_snapshot,
     snapshot_month_options,
     whole,
 )
@@ -61,6 +62,13 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
     saved_date = st.session_state.pop("snapshot_saved_date", None)
     if saved_date:
         st.success(f"Snapshot saved for {saved_date}.")
+    refreshed = st.session_state.pop("snapshot_refreshed", None)
+    if refreshed:
+        snapshot_date, data_date = refreshed
+        st.success(
+            f"Market data refreshed for {snapshot_date}, using data available on or before "
+            f"{data_date}."
+        )
 
     months = snapshot_month_options(portfolio.snapshots, today)
     with st.expander("Enter or edit snapshot", expanded=False):
@@ -92,11 +100,16 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
 
         st.caption(
             "Enter a value or units and price. For tickered assets, leave Price override blank "
-            "to fetch the historical close when saving."
+            "to fetch a close when saving. Future snapshots use the latest data available today."
         )
         editor_key = f"snapshot_entries_{handle}_{selected_date}"
+        template = (
+            None
+            if existing is not None
+            else previous_month_snapshot(portfolio.snapshots, selected_month)
+        )
         editor_data = pd.DataFrame(
-            build_snapshot_editor_rows(portfolio.specs, existing, row_label)
+            build_snapshot_editor_rows(portfolio.specs, existing, row_label, template)
         ).set_index("key")
         with st.form(f"snapshot_form_{handle}_{selected_date}"):
             edited = st.data_editor(
@@ -128,6 +141,46 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
                 type="primary",
             )
 
+        if existing is not None and st.button(
+            "Refresh market data",
+            key=f"refresh_snapshot_{handle}_{selected_date}",
+        ):
+            previous_snapshots = list(portfolio.snapshots)
+            data_date = min(selected_date, today)
+            refreshed_holdings = []
+            for asset in existing.assets:
+                holding = asset.to_dict()
+                spec = portfolio.spec(asset.ref)
+                if asset.value is None and asset.units is not None and spec.ticker is not None:
+                    holding.pop("price", None)
+                refreshed_holdings.append(holding)
+            try:
+                with st.spinner("Refreshing snapshot rates and ticker prices..."):
+                    replacement = create_snapshot(
+                        selected_date,
+                        refreshed_holdings,
+                        portfolio.currencies,
+                        portfolio.specs,
+                        market_data_date=data_date,
+                    )
+                    portfolio.snapshots = sorted(
+                        [
+                            snapshot
+                            for snapshot in portfolio.snapshots
+                            if snapshot.date != selected_date
+                        ]
+                        + [replacement],
+                        key=lambda snapshot: snapshot.date,
+                    )
+                    save(portfolio)
+            except (SnapshotError, FxError, OSError) as exc:
+                portfolio.snapshots = previous_snapshots
+                st.error(f"Could not refresh market data for {selected_date}: {exc}")
+                return
+
+            st.session_state["snapshot_refreshed"] = (selected_date, data_date)
+            st.rerun()
+
         if not submitted:
             return
 
@@ -140,7 +193,11 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
         try:
             with st.spinner("Fetching snapshot rates and ticker prices..."):
                 if existing is None:
-                    portfolio.add_snapshot(selected_date, holdings)
+                    portfolio.add_snapshot(
+                        selected_date,
+                        holdings,
+                        market_data_date=min(selected_date, today),
+                    )
                 else:
                     replacement = create_snapshot(
                         selected_date,
@@ -148,6 +205,7 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
                         portfolio.currencies,
                         portfolio.specs,
                         fx=existing.fx,
+                        market_data_date=min(selected_date, today),
                     )
                     portfolio.snapshots = sorted(
                         [
