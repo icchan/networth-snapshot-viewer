@@ -1,19 +1,43 @@
 # Finance tracker
 
-Personal net-worth history. This is a fresh start: currently it is just the
-**portfolio data model**. There is no UI yet.
+Personal net-worth history, shown in a Streamlit app and modeled as YAML portfolio
+documents.
+
+## GitHub authentication and storage
+
+Each user enters their own GitHub classic personal access token in the app. Create
+a token with the `repo` scope so the app can create and update the user's private
+repository. No GitHub OAuth client credentials or user tokens are required in
+Streamlit Community Cloud secrets or in this repository. GitHub validates the
+token and returns the account name. By default, the token is kept only in
+Streamlit session state. The login form's optional **Remember this browser**
+setting stores it in that browser's localStorage so it survives refreshes; the
+token is never put in the URL or portfolio repository. Browser localStorage is
+not encrypted by the app, and scripts running on the app's origin can read it,
+so only use this on a trusted device. **Log out** clears both the session token
+and the remembered browser token.
+
+The `repo` scope can access the user's private repositories; GitHub classic
+personal access tokens do not provide single-repository scope restrictions. Users
+should create a token for this app and revoke it from GitHub settings when it is
+no longer needed.
+
+Each user has a dedicated private repository named `streamlit-portfolio-data`.
+The app creates it on the first portfolio save; each portfolio is stored at
+`portfolios/{handle}.yaml`. The app does not read or write portfolio data under
+`data/portfolios/`. A new account starts with a USD Cash asset. GitHub API and
+authentication failures are shown in the page.
 
 ## Portfolios
 
-You may hold several portfolios, and each is **its own YAML file** under
-`data/portfolios/`:
+You may hold several portfolios, and each is its own YAML document in the private
+repository:
 
 ```text
-data/
-  prices_cache.json          # derived price data, shared by all portfolios
+streamlit-portfolio-data/
   portfolios/
-    personal.yaml            # loaded as load("personal")
-    family.yaml              # loaded as load("family")
+    personal.yaml
+    family.yaml
 ```
 
 A portfolio file looks like this:
@@ -52,15 +76,14 @@ snapshots:                   # one entry per point in time, in any order
 
 Key decisions:
 
-- **The filename stem is the handle**, and it's what identifies the portfolio in code.
-  `name:` is only a friendlier label, so two portfolios could share a label without
-  conflict.
-- **There is no default portfolio.** Every load names one explicitly, so it is always
-  obvious which portfolio you are looking at and you can't edit the wrong one by
-  forgetting an argument.
+- **The YAML filename stem is the handle**, and it's what identifies the portfolio
+  in code. `name:` is only a friendlier label, so two portfolios could share a
+  label without conflict.
+- **The model loader has no implicit default.** Every model load names one explicitly.
+  The Streamlit page starts a new GitHub account with the `personal` starter portfolio.
 - **A handle is validated, never sanitised.** Case is folded to lower, but anything
-  outside `a-z0-9._-` is rejected, so a handle can never escape the portfolios
-  directory via `..` or a path separator.
+  outside `a-z0-9._-` is rejected, so a handle cannot add path components to the
+  repository file path.
 - **Each portfolio keeps its own currency universe.** Currencies are not shared or
   global.
 - **Prices are cached globally**, not per portfolio, since a close is the same fact
@@ -72,6 +95,8 @@ Key decisions:
 ```python
 from snapshots import list_portfolios, load, save
 
+# These functions are the model's local-YAML API for offline tooling and tests.
+# The Streamlit page uses GitHub storage instead.
 list_portfolios()                  # ['personal', 'family'] -- sorted
 store = load("personal")           # PortfolioError if it doesn't exist
 store.label                        # 'Personal & Family', or the handle
@@ -498,11 +523,11 @@ save(Portfolio(
 ))
 ```
 
-`save` rewrites the file, so **comments are not preserved** — the first save of a
-hand-commented file will strip them. Keep the files in `data/portfolios/` in version
-control (they are small and diff cleanly); if you comment them heavily, expect to
-lose that on the first programmatic write. [`data/prices_cache.json`](data/prices_cache.json)
-is derived data and is git-ignored.
+This local model API rewrites YAML, so **comments are not preserved** by `save`.
+The Streamlit page does not use this API for persistence; it saves portfolio documents
+in each user's private GitHub repository. The repository's `data/portfolios/` YAML
+files remain local fixtures for the model and its tests.
+[`data/prices_cache.json`](data/prices_cache.json) is derived data and is git-ignored.
 
 ## Totalling across currencies
 
@@ -570,6 +595,8 @@ Deliberate choices:
   in `labels.py`.
 - **A blank cell is not a zero.** It means the asset was not held that date, or is held
   with no amount yet. Those are different facts and the table does not blur them.
+- **Excluded assets survive a refresh.** Their selection is kept in a portfolio-specific
+  URL query parameter; it does not change the saved portfolio data.
 - **Every other column converts at its own date's rates**, not today's, so the columns are
   comparable over time rather than being restated into the present.
 - **The last column opens the arithmetic.** Each asset row ends with a
@@ -610,8 +637,6 @@ Two ways it can be less than complete, both shown rather than hidden:
 Closes are cached in the page for 15 minutes, so moving the currency selector does not
 refetch every holding, and each close is retried once so a single timeout does not blank
 the column.
-
-Set `PORTFOLIO_DIR` to read a different folder.
 
 ## Development
 

@@ -729,6 +729,72 @@ def list_portfolios(directory: Path | str = PORTFOLIO_DIR) -> list[str]:
     )
 
 
+def portfolio_from_dict(raw: object, handle: str, *, source: str | None = None) -> Portfolio:
+    """Validate a portfolio mapping from any storage backend."""
+    handle = check_handle(handle)
+    source = source or f"portfolio {handle!r}"
+    if not isinstance(raw, dict):
+        raise SnapshotError(f"{source}: top level must be a mapping")
+
+    raw_name = raw.get("name")
+    if raw_name is not None and (not isinstance(raw_name, str) or not raw_name.strip()):
+        raise SnapshotError(f"{source}: 'name' must be a non-empty string when given")
+    name = raw_name.strip() if isinstance(raw_name, str) else None
+
+    if "currencies" not in raw:
+        raise SnapshotError(f"{source}: missing 'currencies'")
+    currencies = check_currencies(raw["currencies"])
+
+    raw_specs = raw.get("assets", [])
+    if raw_specs is None:
+        raw_specs = []
+    if not isinstance(raw_specs, list):
+        raise SnapshotError(f"{source}: 'assets' must be a list")
+    catalogue = _catalogue(raw_specs, currencies, f"{source}: assets")
+
+    entries = raw.get("snapshots", [])
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list):
+        raise SnapshotError(f"{source}: 'snapshots' must be a list")
+
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or "date" not in entry:
+            continue
+        if not _fx_missing_pairs(entry.get("fx"), currencies):
+            continue
+
+        snapshot_date = check_date(entry["date"], f"{source}: snapshots[{index}]")
+        data_date = min(snapshot_date, dt.date.today().isoformat())
+        from fx import fetch_fx
+
+        fetched = fetch_fx(dt.date.fromisoformat(data_date), currencies)
+        entry["fx"] = fetched.rates
+        print(
+            f"note: {source} snapshot {snapshot_date} had missing FX; refetched rates using "
+            f"data available on or before {data_date}"
+        )
+
+    snapshots = [
+        Snapshot.from_dict(entry, currencies, catalogue, f"{source}: snapshots[{index}]")
+        for index, entry in enumerate(entries)
+    ]
+
+    dates = [s.date for s in snapshots]
+    duplicates = sorted({d for d in dates if dates.count(d) > 1})
+    if duplicates:
+        raise SnapshotError(f"{source}: duplicate snapshot date(s): {', '.join(duplicates)}")
+
+    snapshots.sort(key=lambda s: s.date)
+    return Portfolio(
+        currencies=currencies,
+        specs=list(catalogue.values()),
+        snapshots=snapshots,
+        name=name,
+        handle=handle,
+    )
+
+
 def load_file(path: Path | str) -> Portfolio:
     """Read and validate a portfolio from an explicit path."""
     path = Path(path)
@@ -739,67 +805,9 @@ def load_file(path: Path | str) -> Portfolio:
     except yaml.YAMLError as exc:
         raise SnapshotError(f"{path} is not valid YAML: {exc}") from None
 
-    if not isinstance(raw, dict):
-        raise SnapshotError(f"{path}: top level must be a mapping")
-
-    raw_name = raw.get("name")
-    if raw_name is not None and (not isinstance(raw_name, str) or not raw_name.strip()):
-        raise SnapshotError(f"{path}: 'name' must be a non-empty string when given")
-    name = raw_name.strip() if isinstance(raw_name, str) else None
-
-    if "currencies" not in raw:
-        raise SnapshotError(f"{path}: missing 'currencies'")
-    currencies = check_currencies(raw["currencies"])
-
-    raw_specs = raw.get("assets", [])
-    if raw_specs is None:
-        raw_specs = []
-    if not isinstance(raw_specs, list):
-        raise SnapshotError(f"{path}: 'assets' must be a list")
-    catalogue = _catalogue(raw_specs, currencies, f"{path}: assets")
-
-    entries = raw.get("snapshots", [])
-    if entries is None:
-        entries = []
-    if not isinstance(entries, list):
-        raise SnapshotError(f"{path}: 'snapshots' must be a list")
-
-    for index, entry in enumerate(entries):
-        if not isinstance(entry, dict) or "date" not in entry:
-            continue
-        if not _fx_missing_pairs(entry.get("fx"), currencies):
-            continue
-
-        snapshot_date = check_date(entry["date"], f"{path}: snapshots[{index}]")
-        data_date = min(snapshot_date, dt.date.today().isoformat())
-        from fx import fetch_fx
-
-        fetched = fetch_fx(dt.date.fromisoformat(data_date), currencies)
-        entry["fx"] = fetched.rates
-        print(
-            f"note: snapshot {snapshot_date} had missing FX; refetched rates using "
-            f"data available on or before {data_date}"
-        )
-
-    snapshots = [
-        Snapshot.from_dict(entry, currencies, catalogue, f"{path}: snapshots[{index}]")
-        for index, entry in enumerate(entries)
-    ]
-
-    dates = [s.date for s in snapshots]
-    duplicates = sorted({d for d in dates if dates.count(d) > 1})
-    if duplicates:
-        raise SnapshotError(f"{path}: duplicate snapshot date(s): {', '.join(duplicates)}")
-
-    snapshots.sort(key=lambda s: s.date)
-    return Portfolio(
-        currencies=currencies,
-        specs=list(catalogue.values()),
-        snapshots=snapshots,
-        name=name,
-        handle=check_handle(path.stem),
-        directory=path.parent,
-    )
+    portfolio = portfolio_from_dict(raw, path.stem, source=str(path))
+    portfolio.directory = path.parent
+    return portfolio
 
 
 def load(handle: str, directory: Path | str = PORTFOLIO_DIR) -> Portfolio:

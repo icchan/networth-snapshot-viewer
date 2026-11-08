@@ -8,7 +8,6 @@ whose direction is wrong still renders as a perfectly plausible-looking table.
 """
 
 import datetime as dt
-import os
 import sys
 from pathlib import Path
 
@@ -17,6 +16,8 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import github_auth
+import github_storage
 import market
 from fx import FxError
 from labels import TYPE_EMOJI, row_label
@@ -34,15 +35,11 @@ from portfolio_view import (
     whole,
 )
 from snapshots import (
-    PORTFOLIO_DIR,
     Portfolio,
-    PortfolioError,
     Snapshot,
     SnapshotError,
     create_snapshot,
-    list_portfolios,
-    load,
-    save,
+    portfolio_from_dict,
 )
 
 TODAY_COL = "Today"
@@ -58,7 +55,13 @@ def render_portfolio_title(title: str) -> None:
     st.title(title)
 
 
-def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None:
+def render_snapshot_entry(
+    portfolio: Portfolio,
+    handle: str,
+    today: str,
+    user_token: str,
+    username: str,
+) -> None:
     saved_date = st.session_state.pop("snapshot_saved_date", None)
     if saved_date:
         st.success(f"Snapshot saved for {saved_date}.")
@@ -172,8 +175,16 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
                         + [replacement],
                         key=lambda snapshot: snapshot.date,
                     )
-                    save(portfolio)
-            except (SnapshotError, FxError, OSError) as exc:
+                    github_storage.save_portfolio(
+                        user_token,
+                        handle,
+                        portfolio.to_dict(),
+                        username=username,
+                    )
+            except (SnapshotError, FxError, github_storage.GitHubStorageError) as exc:
+                if isinstance(exc, github_storage.GitHubStorageError) and exc.status_code == 401:
+                    st.session_state.pop("github_access_token", None)
+                    st.session_state.pop("github_username", None)
                 portfolio.snapshots = previous_snapshots
                 st.error(f"Could not refresh market data for {selected_date}: {exc}")
                 return
@@ -216,8 +227,16 @@ def render_snapshot_entry(portfolio: Portfolio, handle: str, today: str) -> None
                         + [replacement],
                         key=lambda snapshot: snapshot.date,
                     )
-                save(portfolio)
-        except (SnapshotError, FxError, OSError) as exc:
+                github_storage.save_portfolio(
+                    user_token,
+                    handle,
+                    portfolio.to_dict(),
+                    username=username,
+                )
+        except (SnapshotError, FxError, github_storage.GitHubStorageError) as exc:
+            if isinstance(exc, github_storage.GitHubStorageError) and exc.status_code == 401:
+                st.session_state.pop("github_access_token", None)
+                st.session_state.pop("github_username", None)
             portfolio.snapshots = previous_snapshots
             st.error(f"Could not save {selected_date}: {exc}")
             return
@@ -282,6 +301,7 @@ def render_asset_table(
     date_config: dict,
     excluded_labels: list[str],
     asset_keys: tuple[str, ...],
+    handle: str,
 ) -> None:
     table = pd.DataFrame(rows)
     amount_columns = [
@@ -303,7 +323,7 @@ def render_asset_table(
         width="stretch",
         key="assets_editor",
         on_change=apply_toggles,
-        args=(asset_keys,),
+        args=(asset_keys, handle),
         disabled=[column for column in rows[0] if column not in ("In total", "How")],
         column_config={
             "In total": st.column_config.CheckboxColumn(
@@ -533,18 +553,28 @@ def render_currency_totals(
     )
 
 
-def render_sidebar(data_dir: Path) -> tuple[Portfolio, str, str]:
+def render_sidebar(user_token: str, username: str) -> tuple[Portfolio, str, str]:
     st.sidebar.title("Portfolio")
-    handles = list_portfolios(data_dir)
-    if not handles:
-        st.error(f"No portfolio files in `{data_dir}`.")
-        st.stop()
-
-    handle = st.sidebar.selectbox("File", handles)
-    st.sidebar.caption(f"Reading from `{data_dir}`")
     try:
-        portfolio = load(handle, directory=data_dir)
-    except (PortfolioError, SnapshotError) as exc:
+        handles = github_storage.list_portfolios(user_token, username)
+    except github_storage.GitHubStorageError as exc:
+        if exc.status_code == 401:
+            st.session_state.pop("github_access_token", None)
+            st.session_state.pop("github_username", None)
+        st.error(f"Could not list portfolios in GitHub: {exc}")
+        st.stop()
+    if not handles:
+        handles = ["personal"]
+
+    handle = st.sidebar.selectbox("Portfolio", handles)
+    st.sidebar.caption(f"Private repository: {username}/{github_storage.REPOSITORY_NAME}")
+    try:
+        data = github_storage.load_portfolio(user_token, handle, username=username)
+        portfolio = portfolio_from_dict(data, handle)
+    except (SnapshotError, github_storage.GitHubStorageError) as exc:
+        if isinstance(exc, github_storage.GitHubStorageError) and exc.status_code == 401:
+            st.session_state.pop("github_access_token", None)
+            st.session_state.pop("github_username", None)
         st.error(f"`{handle}.yaml` did not load: {exc}")
         st.stop()
 
@@ -554,8 +584,14 @@ def render_sidebar(data_dir: Path) -> tuple[Portfolio, str, str]:
 
 def excluded_assets(portfolio: Portfolio, handle: str) -> set[str]:
     """Keep exclusions and row selections scoped to the selected portfolio."""
-    if st.session_state.get("excluded_for", handle) != handle:
-        st.session_state["excluded"] = set()
+    if st.session_state.get("excluded_for") != handle:
+        saved = st.query_params.get(f"excluded_{handle}", "")
+        valid_keys = {spec.key for spec in portfolio.specs}
+        st.session_state["excluded"] = (
+            {key for key in saved.split(",") if key in valid_keys}
+            if isinstance(saved, str)
+            else set()
+        )
         st.session_state.pop("assets_editor", None)
         st.session_state.pop("inspect_key", None)
     st.session_state["excluded_for"] = handle
@@ -686,8 +722,8 @@ def total_heading(currency: str, excluded: set[str]) -> str:
     return f"Total excluding {count} asset{'' if count == 1 else 's'} ({currency})"
 
 
-def apply_toggles(asset_keys: tuple[str, ...]) -> None:
-    """Fold edited row toggles into the excluded keys in session state.
+def apply_toggles(asset_keys: tuple[str, ...], handle: str) -> None:
+    """Fold edited row toggles into session state and the refresh-persistent URL.
 
     Streamlit runs a widget's callback before the script body, so ``excluded``
     already holds the click that triggered this run by the time rows are built.
@@ -709,6 +745,11 @@ def apply_toggles(asset_keys: tuple[str, ...]) -> None:
             excluded_keys.discard(key)
         else:
             excluded_keys.add(key)
+    query_key = f"excluded_{handle}"
+    if excluded_keys:
+        st.query_params[query_key] = ",".join(sorted(excluded_keys))
+    else:
+        st.query_params.pop(query_key, None)
 
 
 def open_workings(asset_keys: tuple[str, ...]) -> None:
@@ -731,11 +772,11 @@ def open_workings(asset_keys: tuple[str, ...]) -> None:
 
 
 def main() -> None:
-    # Page setup and sidebar: select the portfolio and display currency.
+    # Page setup and authentication must precede all portfolio data access.
     st.set_page_config(page_title="Portfolio", layout="wide")
-    data_dir = Path(os.environ.get("PORTFOLIO_DIR") or PORTFOLIO_DIR)
+    user_token, username = github_auth.require_github_login()
     today = dt.date.today().isoformat()
-    portfolio, handle, currency = render_sidebar(data_dir)
+    portfolio, handle, currency = render_sidebar(user_token, username)
     render_portfolio_title(portfolio.label or handle)
     # Reserve space below the title; fill it once today's total is available.
     current_net_worth_slot = st.empty()
@@ -743,7 +784,7 @@ def main() -> None:
     # Empty portfolio: offer snapshot entry instead of charts and tables.
     if not portfolio.snapshots:
         st.subheader(f"Assets over time ({currency})")
-        render_snapshot_entry(portfolio, handle, today)
+        render_snapshot_entry(portfolio, handle, today, user_token, username)
         st.info("Save your first snapshot above to start tracking this portfolio.")
         return
 
@@ -798,7 +839,7 @@ def main() -> None:
         ":material/info:",
     )
     st.subheader(f"Assets over time ({currency})")
-    render_snapshot_entry(portfolio, handle, today)
+    render_snapshot_entry(portfolio, handle, today, user_token, username)
     render_asset_table(
         rows,
         currency,
@@ -808,6 +849,7 @@ def main() -> None:
         ),
         [row_label(spec) for spec in ordered if spec.key in excluded],
         tuple(spec.key for spec in ordered),
+        handle,
     )
 
     # Optional workings panel: explain the asset selected with the table's How button.

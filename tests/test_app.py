@@ -9,6 +9,7 @@ disagrees with the model, or a column that stopped being a date.
 
 import datetime as dt
 import json
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,13 +21,21 @@ from helpers import check
 from streamlit.proto.WidgetStates_pb2 import WidgetStates
 from streamlit.testing.v1 import AppTest
 
+import github_storage
 import market
 import prices
 from fx import FxError, FxRates
 from labels import TYPE_EMOJI
 from labels import flag as flag_of
 from labels import row_label as label_of
-from snapshots import load
+from snapshots import (
+    PORTFOLIO_DIR,
+    PortfolioError,
+    list_portfolios,
+    load,
+    portfolio_from_dict,
+    save,
+)
 
 APP = Path(__file__).resolve().parent.parent / "app.py"
 
@@ -80,6 +89,30 @@ def fake_fetch_marks(currencies, tickers, on, **kwargs):
 def fake_network(monkeypatch):
     """Replace the one network seam, restoring it after every test."""
     monkeypatch.setattr(market, "fetch_marks", fake_fetch_marks)
+
+
+@pytest.fixture(autouse=True)
+def fake_github_storage(monkeypatch):
+    """Keep page tests offline while exercising their real local fixtures."""
+
+    def directory():
+        return Path(os.environ.get("PORTFOLIO_DIR") or PORTFOLIO_DIR)
+
+    def list_user_portfolios(_token, _username):
+        return list_portfolios(directory())
+
+    def load_user_portfolio(_token, handle, username=None):
+        try:
+            return load(handle, directory=directory()).to_dict()
+        except PortfolioError:
+            return {**github_storage.DEFAULT_PORTFOLIO}
+
+    def save_user_portfolio(_token, handle, data, username=None):
+        save(portfolio_from_dict(data, handle), directory=directory())
+
+    monkeypatch.setattr(github_storage, "list_portfolios", list_user_portfolios)
+    monkeypatch.setattr(github_storage, "load_portfolio", load_user_portfolio)
+    monkeypatch.setattr(github_storage, "save_portfolio", save_user_portfolio)
 
 
 @pytest.fixture(autouse=True)
@@ -194,6 +227,8 @@ def run():
     # previous test's answer.
     st.cache_data.clear()
     at = AppTest.from_file(str(APP), default_timeout=60)
+    at.session_state["github_access_token"] = "test-token"
+    at.session_state["github_username"] = "test-user"
     at.run()
     return at
 
@@ -294,6 +329,84 @@ def test_page_loads_cleanly(fresh):
         len(table_records(snapshot_entry_frame(at))) == len(fresh.portfolio.specs),
         str(table_records(snapshot_entry_frame(at))),
     )
+
+
+def test_login_form_offers_opt_in_browser_storage():
+    """The PAT persistence choice is explicit on the logged-out page."""
+    at = AppTest.from_file(str(APP), default_timeout=60).run()
+    check("login renders without an exception", not at.exception, str(at.exception))
+    check(
+        "browser storage is opt-in",
+        any(box.label == "Remember this browser" and not box.value for box in at.checkbox),
+        str([box.label for box in at.checkbox]),
+    )
+
+
+def test_remembered_pat_restores_session(monkeypatch):
+    """A browser component reply restores the token and revalidates its owner."""
+    import github_auth
+
+    monkeypatch.setattr(github_auth, "_github_username", lambda token: "remembered-user")
+    at = AppTest.from_file(str(APP), default_timeout=60).run()
+    load_id = at.session_state["_browser_pat_load_id"]
+    at.session_state["github_browser_pat_storage"] = {
+        "ready": True,
+        "operation_id": load_id,
+        "token": "browser-test-token",
+    }
+    at.run()
+
+    check("restored token logs in without errors", not at.exception, str(at.exception))
+    check(
+        "restored PAT is placed in session state",
+        at.session_state["github_access_token"] == "browser-test-token",
+    )
+    check(
+        "username is revalidated from GitHub rather than stored in the browser",
+        at.session_state["github_username"] == "remembered-user",
+    )
+
+
+@pytest.mark.parametrize(("remember", "action"), [(False, "clear"), (True, "save")])
+def test_login_is_not_blocked_by_browser_storage(remember, action, monkeypatch):
+    """Browser storage failures do not prevent an otherwise valid login."""
+    import github_auth
+
+    monkeypatch.setattr(github_auth, "_github_username", lambda token: "test-user")
+    at = AppTest.from_file(str(APP), default_timeout=60).run()
+    at.text_input[0].set_value("test-token")
+    at.checkbox[0].set_value(remember)
+    at.button[0].click().run()
+
+    check("login completes without a browser storage reply", not at.exception, str(at.exception))
+    check("session credentials are available", at.session_state["github_username"] == "test-user")
+    check(
+        "the selected persistence operation is pending",
+        at.session_state["_browser_pat_action"]["action"] == action,
+    )
+
+
+def test_logout_clears_browser_storage_without_duplicate_component(monkeypatch):
+    """Logout can clear storage and still show the login form in the same run."""
+    at = AppTest.from_file(str(APP), default_timeout=60)
+    at.session_state["github_access_token"] = "test-token"
+    at.session_state["github_username"] = "test-user"
+    at.run()
+    at.sidebar.button[0].click().run()
+
+    check(
+        "logout does not produce a duplicate-component error", not at.exception, str(at.exception)
+    )
+    action = at.session_state["_browser_pat_action"]
+    check("logout schedules browser-token removal", action["action"] == "clear")
+    at.session_state["github_browser_pat_storage"] = {
+        "ready": True,
+        "operation_id": action["operation_id"],
+        "cleared": True,
+    }
+    at.run()
+    check("the login form returns after storage is cleared", bool(at.text_input), str(at.exception))
+    check("the clear operation is acknowledged", "_browser_pat_action" not in at.session_state)
 
 
 # --- the assets table ---------------------------------------------------------
@@ -401,6 +514,8 @@ def test_today_colors_handle_unchanged_and_missing_values(current, previous, exp
 def test_asset_callbacks_skip_summary_rows(monkeypatch):
     from app import apply_toggles, open_workings
 
+    query_params = {}
+    monkeypatch.setattr(st, "query_params", query_params)
     state = {
         "assets_editor": {
             "edited_rows": {
@@ -412,8 +527,16 @@ def test_asset_callbacks_skip_summary_rows(monkeypatch):
         }
     }
     monkeypatch.setattr(st, "session_state", state)
-    apply_toggles(("first", "last"))
+    apply_toggles(("first", "last"), "portfolio")
     check("checkboxes map only asset rows to their keys", state["excluded"] == {"first", "last"})
+    check(
+        "exclusions are saved in the selected portfolio's URL",
+        query_params == {"excluded_portfolio": "first,last"},
+        str(query_params),
+    )
+    state["assets_editor"] = {"edited_rows": {2: {"In total": True}, 3: {"In total": True}}}
+    apply_toggles(("first", "last"), "portfolio")
+    check("clearing exclusions removes the URL setting", query_params == {}, str(query_params))
     for row in (0, 1):
         state["inspect_btn"] = {"row": row}
         open_workings(("first", "last"))
@@ -1124,6 +1247,34 @@ def test_ticking_assets_out(personal, ordered, dates, latest):
     check("the notice goes away", not ticked.info, str([i.value for i in ticked.info]))
 
 
+def test_exclusions_restore_from_url(ordered):
+    """A fresh page session restores unchecked assets from its URL."""
+    excluded_spec = ordered[0]
+
+    def open_page():
+        page = AppTest.from_file(str(APP), default_timeout=60)
+        page.session_state["github_access_token"] = "test-token"
+        page.session_state["github_username"] = "test-user"
+        page.query_params["excluded_personal"] = excluded_spec.key
+        page.run()
+        return page
+
+    page = open_page()
+    check("saved exclusions load without errors", not page.exception, str(page.exception))
+    rows = table_records(asset_frame(page))
+    excluded_row = next(row for row in rows if row["Asset"] == label_of(excluded_spec))
+    check("the URL selection restores the unchecked row", excluded_row["In total"] is False)
+    check("the URL selection restores the adjusted total", "excluding 1 asset" in rows[1]["Asset"])
+
+    refreshed = open_page()
+    refreshed_rows = table_records(asset_frame(refreshed))
+    check(
+        "a new page session (as after refresh) keeps the exclusion",
+        next(row for row in refreshed_rows if row["Asset"] == excluded_row["Asset"])["In total"]
+        is False,
+    )
+
+
 # --- reacting to the sidebar --------------------------------------------------
 
 
@@ -1225,18 +1376,18 @@ def test_unmapped_currency_marks(tmp_path, monkeypatch):
 
 
 def test_empty_folder(tmp_path, monkeypatch):
-    """An empty portfolio folder is a message, not a crash."""
+    """A user with no saved portfolios gets the starter portfolio."""
     monkeypatch.setenv("PORTFOLIO_DIR", str(tmp_path))
     at = run()
     check(
-        "an empty folder is reported, not raised",
+        "the starter portfolio renders without raising",
         not at.exception,
         str([e.value for e in at.exception]),
     )
     check(
-        "...with a message naming the folder",
-        any(str(tmp_path) in e.value for e in at.error),
-        str([e.value for e in at.error]),
+        "the first-snapshot prompt is shown for a new account",
+        any("first snapshot" in info.value for info in at.info),
+        str([info.value for info in at.info]),
     )
 
 

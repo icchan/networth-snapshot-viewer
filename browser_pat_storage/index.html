@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Browser token storage</title>
+  </head>
+  <body>
+    <script>
+      function sendValue(value) {
+        window.parent.postMessage(
+          {
+            isStreamlitMessage: true,
+            type: "streamlit:setComponentValue",
+            value,
+            dataType: "json",
+          },
+          "*",
+        );
+      }
+
+      window.addEventListener("message", (event) => {
+        const message = event.data;
+        if (!message || message.type !== "streamlit:render") return;
+
+        const { action, operation_id: operationId, storage_key: storageKey, token } =
+          message.args;
+        try {
+          let result = {};
+          if (action === "load") {
+            result.token = window.localStorage.getItem(storageKey);
+          } else if (action === "save") {
+            window.localStorage.setItem(storageKey, token);
+            result.saved = true;
+          } else if (action === "clear") {
+            window.localStorage.removeItem(storageKey);
+            result.cleared = true;
+          } else {
+            throw new Error("Unsupported storage operation.");
+          }
+          sendValue({ ready: true, operation_id: operationId, ...result });
+        } catch {
+          sendValue({
+            ready: true,
+            operation_id: operationId,
+            error: "Browser storage is unavailable.",
+          });
+        }
+      });
+
+      window.parent.postMessage(
+        { isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 },
+        "*",
+      );
+      window.parent.postMessage(
+        { isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: 0 },
+        "*",
+      );
+    </script>
+  </body>
+</html>

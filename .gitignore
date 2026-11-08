@@ -27,13 +27,14 @@ ENV/
 
 # Streamlit
 .streamlit/secrets.toml
+.local
 
 # Derived from the price source; rebuilt on demand.
 data/prices_cache.json
 
 # Your portfolios are personal financial data. Uncomment to keep them out of
 # version control.
-# data/portfolios/
+data/portfolios/
 
 
 # VS Code / OS
